@@ -22,15 +22,31 @@ let base: string;
 let server: ReturnType<typeof createApi>;
 const chain = new FakeChain();
 
-function staffKey() {
-  const kp = generateKeyPairSync("ed25519");
-  const pubDer = kp.publicKey.export({ format: "der", type: "spki" }) as Buffer;
-  const pubkey = pubDer.subarray(pubDer.length - 32); // raw ed25519 key
-  return { kp, pubkey, addr: addrFromPubkey(pubkey) };
+function secp256k1StaffKey() {
+  // gnokey's default key type: secp256k1, compressed 33-byte pubkey.
+  const kp = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
+  const der = kp.publicKey.export({ format: "der", type: "spki" }) as Buffer;
+  const unc = der.subarray(der.length - 65); // uncompressed point 04|x|y
+  const compressed = Buffer.concat([
+    Buffer.from([unc[64]! & 1 ? 0x03 : 0x02]), unc.subarray(1, 33),
+  ]);
+  const signDoc = (doc: string) => cryptoSign(
+    "sha256", Buffer.from(doc, "utf8"),
+    { key: kp.privateKey, dsaEncoding: "ieee-p1363" });
+  return { kp, pubkey: compressed, addr: addrFromPubkey(compressed), signDoc };
 }
 
-const staff = staffKey();
-const intruder = staffKey();
+function ed25519StaffKey() {
+  const kp = generateKeyPairSync("ed25519");
+  const pubDer = kp.publicKey.export({ format: "der", type: "spki" }) as Buffer;
+  const pubkey = pubDer.subarray(pubDer.length - 32);
+  const signDoc = (doc: string) =>
+    cryptoSign(null, Buffer.from(doc, "utf8"), kp.privateKey);
+  return { kp, pubkey, addr: addrFromPubkey(pubkey), signDoc };
+}
+
+const staff = secp256k1StaffKey();
+const intruder = secp256k1StaffKey();
 
 function ev(seq: number, kind: string, org = "") {
   return { seq, height: seq, kind, kit: "", leg: "", line: "", org, data: "" };
@@ -50,18 +66,18 @@ async function api(
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 
-async function signChallenge(addr: string, kp = staff.kp, pubkey = staff.pubkey) {
+async function signChallenge(key = staff) {
   const ch = await api("/api/session/challenge", {
     method: "POST",
-    body: { addr, org: "A", deviceId: "desk-1" },
+    body: { addr: key.addr, org: "A", deviceId: "desk-1" },
   });
   if (ch.status !== 200) return { status: ch.status } as any;
-  const sig = cryptoSign(null, Buffer.from(ch.body.signdoc, "utf8"), kp.privateKey);
+  const sig = key.signDoc(ch.body.signdoc);
   const login = await api("/api/session", {
     method: "POST",
     body: {
       challengeId: ch.body.challengeId,
-      pubkey: pubkey.toString("base64"),
+      pubkey: key.pubkey.toString("base64"),
       signature: sig.toString("base64"),
     },
   });
@@ -120,8 +136,8 @@ test("challenge refused for an address with no grant", async () => {
   assert.equal(ch.status, 403);
 });
 
-test("genuine signed login issues a working session", async () => {
-  const r = await signChallenge(staff.addr);
+test("genuine secp256k1 signed login issues a working session", async () => {
+  const r = await signChallenge(staff);
   assert.equal(r.status, 201, `login failed: ${JSON.stringify(r)}`);
   const kits = await api("/api/kits", { token: r.token });
   assert.equal(kits.status, 200);
@@ -132,8 +148,7 @@ test("signature by the wrong key is rejected", async () => {
     method: "POST", body: { addr: staff.addr, org: "A", deviceId: "desk-1" },
   });
   assert.equal(ch.status, 200);
-  const sig = cryptoSign(
-    null, Buffer.from(ch.body.signdoc, "utf8"), intruder.kp.privateKey);
+  const sig = intruder.signDoc(ch.body.signdoc);
   const login = await api("/api/session", {
     method: "POST",
     body: {
@@ -149,7 +164,7 @@ test("a challenge cannot be replayed", async () => {
   const ch = await api("/api/session/challenge", {
     method: "POST", body: { addr: staff.addr, org: "A", deviceId: "desk-1" },
   });
-  const sig = cryptoSign(null, Buffer.from(ch.body.signdoc, "utf8"), staff.kp.privateKey);
+  const sig = staff.signDoc(ch.body.signdoc);
   const body = {
     challengeId: ch.body.challengeId,
     pubkey: staff.pubkey.toString("base64"),
@@ -162,7 +177,7 @@ test("a challenge cannot be replayed", async () => {
 });
 
 test("grant revocation in the realm kills live session access", async () => {
-  const { token } = await signChallenge(staff.addr);
+  const { token } = await signChallenge(staff);
   assert.ok(token);
   assert.equal((await api("/api/kits", { token })).status, 200);
 

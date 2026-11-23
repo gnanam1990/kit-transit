@@ -6,8 +6,10 @@
 // and private-evidence read (revocation is live).
 
 import { randomBytes } from "node:crypto";
-import type { Pool } from "./db.ts";
-import { addrFromPubkey, verifySignature, challengeSigndoc } from "./authn.ts";
+import { inTx, type Pool } from "./db.ts";
+import {
+  addrFromPubkey, verifySignature, challengeSigndoc, challengeTx,
+} from "./authn.ts";
 
 export interface Session {
   token: string;
@@ -28,6 +30,7 @@ async function hasActiveGrant(pool: Pool, org: string, addr: string): Promise<bo
 export interface Challenge {
   challengeId: string;
   signdoc: string;
+  tx: object;
   expiresAt: string;
 }
 
@@ -42,16 +45,20 @@ export async function createChallenge(
   if (!(await hasActiveGrant(pool, opts.org, opts.addr))) return null;
   const challengeId = `chl-${randomBytes(12).toString("hex")}`;
   const nonce = randomBytes(16).toString("hex");
-  const signdoc = challengeSigndoc({
+  const signOpts = {
     chainId: opts.network, realm: opts.realm, addr: opts.addr, nonce,
-  });
+  };
+  const signdoc = challengeSigndoc(signOpts);
   await pool.query(
     `INSERT INTO auth_challenges (challenge_id, addr, org_id, device_id,
        network, realm, signdoc, expires_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7, now() + ($8 || ' seconds')::interval)`,
     [challengeId, opts.addr, opts.org, opts.deviceId, opts.network, opts.realm,
      signdoc, CHALLENGE_TTL_SEC]);
-  return { challengeId, signdoc, expiresAt: `${CHALLENGE_TTL_SEC}s` };
+  return {
+    challengeId, signdoc, tx: challengeTx(signOpts),
+    expiresAt: `${CHALLENGE_TTL_SEC}s`,
+  };
 }
 
 export class AuthError extends Error {
@@ -68,34 +75,41 @@ export class AuthError extends Error {
 export async function redeemChallenge(
   pool: Pool, challengeId: string, pubkeyB64: string, signatureB64: string, ttlSec: number,
 ): Promise<Session> {
-  const ch = await pool.query(
-    `SELECT * FROM auth_challenges WHERE challenge_id=$1`, [challengeId]);
-  const row = ch.rows[0] as any;
-  if (!row || row.used_at || new Date(row.expires_at) < new Date()) {
-    throw new AuthError("challenge invalid, used or expired", "challenge");
-  }
-  const pubkey = Buffer.from(pubkeyB64, "base64");
-  const sig = Buffer.from(signatureB64, "base64");
-  if (pubkey.length !== 32 || sig.length !== 64) {
-    throw new AuthError("malformed key or signature", "signature");
-  }
-  if (addrFromPubkey(pubkey) !== row.addr) {
-    throw new AuthError("pubkey does not derive the claimed address", "binding");
-  }
-  if (!verifySignature(row.signdoc, sig, pubkey)) {
-    throw new AuthError("signature verification failed", "signature");
-  }
-  if (!(await hasActiveGrant(pool, row.org_id, row.addr))) {
-    throw new AuthError("grant no longer active", "grant");
-  }
-  await pool.query(
-    `UPDATE auth_challenges SET used_at=now() WHERE challenge_id=$1`, [challengeId]);
-  const token = randomBytes(24).toString("hex");
-  await pool.query(
-    `INSERT INTO sessions (token, addr, org_id, device_id, expires_at)
-     VALUES ($1,$2,$3,$4, now() + ($5 || ' seconds')::interval)`,
-    [token, row.addr, row.org_id, row.device_id, ttlSec]);
-  return { token, addr: row.addr, org_id: row.org_id, device_id: row.device_id };
+  return inTx(pool, async (c) => {
+    // Atomically consume the challenge and mint the session in one tx: the
+    // UPDATE ... RETURNING only fires when the challenge is unused and
+    // unexpired, so concurrent redemptions can't double-spend it. A failed
+    // verification rolls back the consume as well as the insert.
+    const ch = await c.query(
+      `UPDATE auth_challenges SET used_at=now()
+       WHERE challenge_id=$1 AND used_at IS NULL AND expires_at > now()
+       RETURNING *`, [challengeId]);
+    const row = ch.rows[0] as any;
+    if (!row) throw new AuthError("challenge invalid, used or expired", "challenge");
+    const pubkey = Buffer.from(pubkeyB64, "base64");
+    const sig = Buffer.from(signatureB64, "base64");
+    if (![32, 33].includes(pubkey.length) || sig.length !== 64) {
+      throw new AuthError("malformed key or signature", "signature");
+    }
+    if (addrFromPubkey(pubkey) !== row.addr) {
+      throw new AuthError("pubkey does not derive the claimed address", "binding");
+    }
+    if (!verifySignature(row.signdoc, sig, pubkey)) {
+      throw new AuthError("signature verification failed", "signature");
+    }
+    const g = await c.query(
+      `SELECT 1 FROM proj_grants WHERE org_id=$1 AND addr=$2 AND active=true LIMIT 1`,
+      [row.org_id, row.addr]);
+    if (g.rowCount === 0) {
+      throw new AuthError("grant no longer active", "grant");
+    }
+    const token = randomBytes(24).toString("hex");
+    await c.query(
+      `INSERT INTO sessions (token, addr, org_id, device_id, expires_at)
+       VALUES ($1,$2,$3,$4, now() + ($5 || ' seconds')::interval)`,
+      [token, row.addr, row.org_id, row.device_id, ttlSec]);
+    return { token, addr: row.addr, org_id: row.org_id, device_id: row.device_id };
+  });
 }
 
 /**
