@@ -9,7 +9,7 @@
     "migrate": "node src/migrate.ts",
     "indexer": "node src/indexer.ts --daemon",
     "api": "node src/api.ts",
-    "test": "node --test "test/*.test.ts"",
+    "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "stack:up": "scripts/dev-stack.sh up",
     "stack:down": "scripts/dev-stack.sh down",
