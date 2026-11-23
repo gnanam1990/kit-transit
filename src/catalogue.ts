@@ -138,22 +138,34 @@ export async function resolveQuarantine(
 }
 
 /**
- * Drain pending catalogue outbox rows into catalogue_items (barcode =
- * kit_id for the kit-level sync contract). Failures stay pending or move to
- * manual_review on version conflict — realm state is never touched (T-020).
+ * Drain pending catalogue outbox rows into the CALLER'S branch catalogue
+ * (barcode = kit_id for the kit-level sync contract). Delivery state is
+ * per (outbox row, branch): one branch's sent/conflict never consumes the
+ * feed for another branch. Failures stay pending or move to conflict —
+ * realm state is never touched (T-020).
  */
 export async function drainOutbox(pool: Pool, branch: string): Promise<{ sent: number; conflicts: number }> {
   const rows = await pool.query(
-    `SELECT * FROM outbox WHERE status IN ('pending','conflict') ORDER BY seq LIMIT 200`);
+    `SELECT o.* FROM outbox o
+     LEFT JOIN outbox_delivery d ON d.outbox_seq=o.seq AND d.branch=$1
+     WHERE d.outbox_seq IS NULL OR d.status IN ('pending','conflict')
+     ORDER BY o.seq LIMIT 200`, [branch]);
   let sent = 0, conflicts = 0;
+  const mark = async (seq: number, status: string, err = "") => {
+    await pool.query(
+      `INSERT INTO outbox_delivery (outbox_seq, branch, status, attempts, last_error)
+       VALUES ($1,$2,$3,1,$4)
+       ON CONFLICT (outbox_seq, branch) DO UPDATE SET
+         status=$3, attempts=outbox_delivery.attempts+1,
+         last_error=$4, updated_at=now()`,
+      [seq, branch, status, err]);
+  };
   for (const r of rows.rows) {
     const cur = await pool.query(
       `SELECT seq FROM catalogue_items WHERE branch=$1 AND barcode=$2`, [branch, r.kit_id]);
     const curSeq = cur.rows[0] ? Number(cur.rows[0].seq) : -1;
     if (curSeq > Number(r.event_seq)) {
-      await pool.query(
-        `UPDATE outbox SET status='conflict', last_error='newer catalogue state exists', updated_at=now() WHERE seq=$1`,
-        [r.seq]);
+      await mark(r.seq, "conflict", "newer catalogue state exists");
       conflicts++;
       continue;
     }
@@ -163,14 +175,27 @@ export async function drainOutbox(pool: Pool, branch: string): Promise<{ sent: n
          VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (branch, barcode) DO UPDATE SET state=$4, seq=$5, updated_at=now()`,
         [branch, r.kit_id, r.kit_id, r.state, r.event_seq]);
-      await pool.query(
-        `UPDATE outbox SET status='sent', updated_at=now() WHERE seq=$1`, [r.seq]);
+      await mark(r.seq, "sent");
       sent++;
     } catch (err) {
-      await pool.query(
-        `UPDATE outbox SET attempts=attempts+1, last_error=$2, updated_at=now() WHERE seq=$1`,
-        [r.seq, (err as Error).message]);
+      await mark(r.seq, "pending", (err as Error).message);
     }
+  }
+  // Roll the per-branch deliveries up to the shared feed row so operators
+  // can see the feed state at a glance. A branch that has not drained yet
+  // is invisible here by design — its pending rows are still selected above.
+  if (rows.rows.length > 0) {
+    await pool.query(
+      `UPDATE outbox o SET status=(
+         SELECT CASE WHEN COUNT(*) FILTER (WHERE d.status IN ('conflict','manual_review')) > 0
+                     THEN 'conflict'
+                     WHEN COUNT(*) FILTER (WHERE d.status <> 'sent') = 0 AND COUNT(*) > 0
+                     THEN 'sent'
+                     ELSE 'pending' END
+         FROM outbox_delivery d WHERE d.outbox_seq=o.seq),
+         updated_at=now()
+       WHERE o.seq = ANY($1)`,
+      [rows.rows.map((r) => r.seq)]);
   }
   return { sent, conflicts };
 }

@@ -107,3 +107,32 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 /* incoming kit / active leg picker */
 .legpicker { margin: .4rem 0 1rem; }
 .legpicker select { min-height: 44px; min-width: 16rem; }
+
+/* private evidence attachment */
+.evbox { margin-top: 1.2rem; border: 1.5px solid var(--line); border-radius: 8px; padding: .8rem; }
+.evbox legend { font-weight: 600; }
+
+/* institution work queue */
+.qtabbar { display: flex; gap: .35rem; flex-wrap: wrap; margin: .5rem 0 .8rem; }
+.qtabbar button {
+  min-height: var(--min-tap); padding: .35rem .9rem;
+  border: 1.5px solid var(--line); border-radius: 999px;
+  background: #fff; color: var(--ink); font: inherit; font-weight: 600;
+  cursor: pointer;
+}
+.qtabbar button[aria-selected="true"] {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+}
+#queue-body li { flex-wrap: wrap; }
+
+/* persisted manifest revision diff */
+.revdiff {
+  margin-top: 1rem; padding: .8rem;
+  border: 1.5px solid var(--warn); border-radius: 8px; background: #fffaf0;
+}
+.revdiff h3 { margin-top: 0; }
+.revdiff .btn { margin-top: .6rem; }
+
+/* assessment line picker */
+#assess-lines li select { width: auto; min-width: 9rem; margin-top: 0; }
+#assess-lines li { flex-wrap: wrap; }

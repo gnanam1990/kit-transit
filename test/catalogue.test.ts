@@ -59,6 +59,39 @@ test("outbox conflict stays pending on newer catalogue state", async () => {
   assert.equal(cur.rows[0].state, "AVAILABLE"); // not overwritten
 });
 
+// One branch's drain must not consume the shared feed for another branch,
+// and a conflict on branch A must not block delivery to branch B.
+test("per-branch outbox delivery: A cannot consume B's transitions", async () => {
+  await pool.query(
+    `INSERT INTO outbox (kit_id, state, event_seq, height, version) VALUES
+      ('kit-1','HELD',10,10,1)`);
+  // Branch A's catalogue is newer -> conflict for A only.
+  await importCsv(pool, parseCsv("branch,barcode,item_ref,state,seq\nA,kit-1,kit-1,AVAILABLE,50\n"));
+  const ra = await drainOutbox(pool, "A");
+  assert.equal(ra.conflicts, 1);
+  assert.equal(ra.sent, 0);
+
+  // Branch B has no newer state -> the same feed row delivers cleanly.
+  const rb = await drainOutbox(pool, "B");
+  assert.equal(rb.sent, 1);
+  const bItem = await pool.query(
+    `SELECT state, seq FROM catalogue_items WHERE branch='B' AND barcode='kit-1'`);
+  assert.equal(bItem.rows[0].state, "HELD");
+  assert.equal(Number(bItem.rows[0].seq), 10);
+
+  // Per-branch delivery rows are independent; feed row rolls up to conflict.
+  const del = await pool.query(
+    `SELECT branch, status FROM outbox_delivery ORDER BY branch`);
+  assert.deepEqual(del.rows.map((r) => [r.branch, r.status]),
+    [["A", "conflict"], ["B", "sent"]]);
+  const feed = await pool.query(`SELECT status FROM outbox WHERE kit_id='kit-1'`);
+  assert.equal(feed.rows[0].status, "conflict");
+
+  // A second B drain is a no-op; A retry still conflicts (not silent).
+  assert.equal((await drainOutbox(pool, "B")).sent, 0);
+  assert.equal((await drainOutbox(pool, "A")).conflicts, 1);
+});
+
 // CSV export is deterministic and marks incomplete kits HELD explicitly.
 test("export marks held/available explicitly and round-trips", async () => {
   await pool.query(

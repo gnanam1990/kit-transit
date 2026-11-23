@@ -161,6 +161,32 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         json(res, 200, await chain.query(`GetExceptions(${JSON.stringify(kit)})`));
         return;
       }
+      if (path === "/api/reader/timeline" && method === "GET") {
+        const kit = url.searchParams.get("kit");
+        const after = Number(url.searchParams.get("after") ?? 0);
+        if (!kit || !Number.isSafeInteger(after) || after < 0) {
+          json(res, 400, { error: "Kit and a nonnegative integer cursor required" }); return;
+        }
+        const page = await chain.events(after, 100);
+        const cursor = page.events.at(-1)?.seq ?? after;
+        json(res, 200, {
+          events: page.events.filter(event => event.kit === kit),
+          cursor, more: cursor > after && cursor < page.lastSeq,
+        });
+        return;
+      }
+      // Immutable manifest revision — used to show the real before/after
+      // diff when a manifest changed between draft and sign-off.
+      if (path === "/api/reader/manifest" && method === "GET") {
+        const kit = url.searchParams.get("kit") ?? "";
+        const rev = Number(url.searchParams.get("rev") ?? "0");
+        if (!Number.isInteger(rev) || rev <= 0) {
+          json(res, 400, { error: "rev must be a positive integer" }); return;
+        }
+        json(res, 200, await chain.query(
+          `GetManifest(${JSON.stringify(kit)},${rev})`));
+        return;
+      }
 
       // ---------- sessions ------------------------------------------------
       // POST /api/session/challenge {addr, org, deviceId} issues a one-use,
@@ -227,6 +253,86 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const excs = await pool.query(
           `SELECT * FROM proj_exceptions WHERE kit=$1 ORDER BY exc_id`, [m[1]]);
         json(res, 200, { kit: kit.rows[0], lines: lines.rows, legs: legs.rows, exceptions: excs.rows });
+        return;
+      }
+      // Institution-specific work queue (UI-SPEC): incoming/outgoing open
+      // legs, open exceptions on kits the org is party to, owner kits
+      // needing inspection, and the org-scoped audit tail. Labels come
+      // only from chain-derived projection state — never local scans.
+      if (path === "/api/queue" && method === "GET") {
+        const s = await sessionOf(req, pool);
+        if (!s) { json(res, 401, { error: "session required" }); return; }
+        const org = s.org_id;
+        const heights = await pool.query(
+          `SELECT kit, MAX(height) AS h FROM realm_events GROUP BY kit`);
+        const kitH = new Map(heights.rows.map((r: any) => [r.kit, Number(r.h)]));
+        const legRow = (l: any, dir: "in" | "out") => {
+          const outstanding = Object.entries(l.qty ?? {})
+            .map(([line, q]: [string, any]) => ({
+              line, qty: Number(q) - Number(l.accepted?.[line] ?? 0) - Number(l.missing?.[line] ?? 0),
+            }))
+            .filter((o) => o.qty > 0)
+            .sort((a, b) => a.line.localeCompare(b.line));
+          return {
+            row: "leg", legId: l.leg_id, kit: l.kit,
+            partner: dir === "in" ? l.sender : l.dest, direction: dir,
+            expected: Object.values(l.qty ?? {}).reduce((a, b) => a + Number(b), 0),
+            received: Object.values(l.accepted ?? {}).reduce((a, b) => a + Number(b), 0),
+            outstanding,
+            oldestOutstanding: outstanding[0]?.line ?? null,
+            lastHeight: Math.max(Number(l.open_height), Number(l.close_height), kitH.get(l.kit) ?? 0),
+            label: "pending movement",
+          };
+        };
+        const legsIn = await pool.query(
+          `SELECT * FROM proj_legs WHERE dest=$1 AND status='open' ORDER BY open_height`, [org]);
+        const legsOut = await pool.query(
+          `SELECT * FROM proj_legs WHERE sender=$1 AND status='open' ORDER BY open_height`, [org]);
+        const inspect = await pool.query(
+          `SELECT k.kit_id, k.manifest_rev FROM proj_kits k
+           WHERE k.owner=$1 AND k.needs_assessment ORDER BY k.kit_id`, [org]);
+        const excs = await pool.query(
+          `SELECT e.* FROM proj_exceptions e WHERE e.status='open' AND (
+             EXISTS (SELECT 1 FROM proj_kits k WHERE k.kit_id=e.kit AND k.owner=$1)
+             OR EXISTS (SELECT 1 FROM proj_legs l
+                        WHERE l.kit=e.kit AND (l.sender=$1 OR l.dest=$1)))
+           ORDER BY e.open_height`, [org]);
+        const audit = await pool.query(
+          `SELECT seq, height, kind, kit, leg, line, org, data FROM realm_events
+           WHERE org=$1 OR kit IN (
+             SELECT kit_id FROM proj_kits WHERE owner=$1
+             UNION SELECT kit FROM proj_legs WHERE sender=$1 OR dest=$1)
+           ORDER BY seq DESC LIMIT 30`, [org]);
+        const incoming = [
+          ...legsIn.rows.map((l: any) => legRow(l, "in")),
+          ...inspect.rows.map((k: any) => ({
+            row: "inspection", kit: k.kit_id, partner: "returned to owner",
+            direction: "in", expected: null, received: null, outstanding: [],
+            oldestOutstanding: null,
+            lastHeight: kitH.get(k.kit_id) ?? 0,
+            label: "needs inspection",
+          })),
+        ];
+        const outgoing = legsOut.rows.map((l: any) => legRow(l, "out"));
+        const exceptions = excs.rows.map((e: any) => ({
+          excId: e.exc_id, kit: e.kit, leg: e.leg, line: e.line,
+          kind: e.kind, qty: Number(e.qty), reason: e.reason, by: e.by,
+          lastHeight: Math.max(Number(e.open_height), kitH.get(e.kit) ?? 0),
+          label: e.kind === "missing" ? "missing"
+               : e.kind === "damaged" ? "damaged" : e.kind,
+        }));
+        json(res, 200, {
+          org,
+          counts: {
+            incoming: incoming.length, outgoing: outgoing.length,
+            exceptions: exceptions.length, audit: audit.rows.length,
+          },
+          incoming, outgoing, exceptions,
+          audit: audit.rows.map((r: any) => ({
+            seq: Number(r.seq), height: Number(r.height), kind: r.kind,
+            kit: r.kit, leg: r.leg, line: r.line, org: r.org, data: r.data,
+          })),
+        });
         return;
       }
 

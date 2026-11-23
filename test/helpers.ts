@@ -46,7 +46,7 @@ export async function freshDb(pool: Pool): Promise<void> {
   await pool.query(`
     TRUNCATE checkpoint, epoch_evidence, realm_events, proj_orgs, proj_grants,
       proj_kits, proj_lines, proj_legs, proj_exceptions, proj_claims, proj_ops,
-      outbox, cases, sessions, evidence_objects, barcode_quarantine,
+      outbox, outbox_delivery, cases, sessions, evidence_objects, barcode_quarantine,
       catalogue_items RESTART IDENTITY CASCADE`);
 }
 

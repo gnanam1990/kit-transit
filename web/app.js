@@ -23,7 +23,12 @@ const state = {
   network: null,
   draft: null,
   kits: [],
-  view: "receive",
+  // The one reviewed thing currently being signed — a receive draft case,
+  // an owner assessment, a release, or a resumed server-side case.
+  review: null,
+  queue: null,
+  queueTab: "incoming",
+  view: "queue",
 };
 
 // ---------- api -------------------------------------------------------------
@@ -37,8 +42,8 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
   if (res.status === 401) {
     say("Session expired — please sign in again");
-    clearSession();
-    show("session");
+    if (state.token) clearSession();
+    else show("session");
     throw new Error("unauthorized");
   }
   return res;
@@ -53,16 +58,20 @@ function renderWho() {
 }
 
 function clearSession() {
-  state.token = null;
+  state.token = state.org = state.addr = state.device = null;
+  state.draft = state.review = state.queue = null;
   for (const k of ["kt.token", "kt.org", "kt.addr", "kt.device"]) {
     localStorage.removeItem(k);
   }
-  $("logout").hidden = true;
-  renderWho();
+  // Discard signed-in DOM, including evidence inputs and any pending network
+  // callbacks, before another institution uses this shared desk.
+  document.querySelector("main").hidden = true;
+  location.hash = "session";
+  location.reload();
 }
 
 // ---------- views -----------------------------------------------------------
-const VIEWS = ["receive", "sign", "case", "session"];
+const VIEWS = ["queue", "receive", "sign", "case", "session"];
 function show(name) {
   state.view = name;
   for (const v of VIEWS) $("view-" + v).hidden = v !== name;
@@ -73,6 +82,92 @@ function show(name) {
   });
   if (name === "receive") $("scan").focus();
   if (name === "case") loadCaseList();
+  if (name === "queue") loadQueue();
+}
+
+// ---------- institution work queue ------------------------------------------
+// Start view. Every row is institution-scoped chain/projection state — a
+// desk's local scans never make anything look received or available here.
+async function loadQueue() {
+  const body = $("queue-body");
+  body.replaceChildren();
+  if (!state.token) {
+    $("queue-sub").textContent =
+      "Sign in with an enrolled institution key to see this desk's queue.";
+    for (const t of ["incoming", "outgoing", "exceptions", "audit"]) {
+      $(`qtab-${t}`).textContent = `${t[0].toUpperCase() + t.slice(1)} (0)`;
+    }
+    return;
+  }
+  try {
+    const res = await api("/api/queue");
+    markCache(res.ok);
+    if (!res.ok) { $("queue-sub").textContent = "Queue unavailable."; return; }
+    const q = await res.json();
+    state.queue = q;
+    $("queue-sub").textContent =
+      `${q.org} — ${q.counts.incoming} incoming · ${q.counts.outgoing} outgoing · ` +
+      `${q.counts.exceptions} open exceptions`;
+    for (const t of ["incoming", "outgoing", "exceptions", "audit"]) {
+      $(`qtab-${t}`).textContent = `${t[0].toUpperCase() + t.slice(1)} (${q.counts[t]})`;
+      $(`qtab-${t}`).setAttribute("aria-selected", String(state.queueTab === t));
+    }
+    renderQueueTab();
+  } catch {
+    markCache(false);
+    $("queue-sub").textContent = "Offline — showing the last known queue.";
+    if (state.queue) renderQueueTab();
+  }
+}
+
+const EMPTY_QUEUE = {
+  incoming: "Nothing incoming — no open legs addressed to this institution.",
+  outgoing: "Nothing outgoing — no dispatches awaiting partner receipt.",
+  exceptions: "No open exceptions on kits this institution is party to.",
+  audit: "No audited events for this institution yet.",
+};
+
+function renderQueueTab() {
+  const q = state.queue, tab = state.queueTab;
+  const body = $("queue-body");
+  body.replaceChildren();
+  if (!q) return;
+  const rows = q[tab] || [];
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.textContent = EMPTY_QUEUE[tab];
+    body.appendChild(li);
+    return;
+  }
+  for (const r of rows) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    if (tab === "audit") {
+      label.textContent =
+        `#${r.seq} h${r.height} · ${r.kind} · ${r.kit || r.org}${r.line ? " · " + r.line : ""}`;
+      li.appendChild(label);
+    } else if (tab === "exceptions") {
+      label.textContent =
+        `${r.kit} · ${r.line} — ${r.reason || "(no reason)"} · by ${r.by} · h${r.lastHeight}`;
+      li.appendChild(label);
+      li.appendChild(tag(r.kind === "missing" ? "bad" : "warn", r.label));
+    } else if (r.row === "inspection") {
+      label.textContent =
+        `${r.kit} · returned to owner — assess before release · h${r.lastHeight}`;
+      li.appendChild(label);
+      li.appendChild(tag("warn", "needs inspection"));
+    } else {
+      const out = r.outstanding.map((o) => `${o.line}×${o.qty}`).join(", ");
+      label.textContent =
+        `${r.kit} · ${r.partner} · ${r.received}/${r.expected} received` +
+        (out ? ` · outstanding ${out}` : "") +
+        (r.oldestOutstanding ? ` · oldest: ${r.oldestOutstanding}` : "") +
+        ` · h${r.lastHeight}`;
+      li.appendChild(label);
+      li.appendChild(tag("warn", r.label));
+    }
+    body.appendChild(li);
+  }
 }
 
 // ---------- cached data badge ------------------------------------------------
@@ -82,9 +177,10 @@ function markCache(ok) {
   const badge = $("cache-badge");
   if (!ok) {
     badge.hidden = false;
-    badge.textContent = lastFetchAt
-      ? `Cached view — data is ${Math.max(1, Math.round((Date.now() - lastFetchAt) / 1000))}s old, not live`
-      : "Offline — showing last known state";
+    const timestamp = state.draft?.sourceCheckedAt ?? lastFetchAt;
+    badge.textContent = timestamp
+      ? `Cached view — data last checked ${Math.max(0, Math.round((Date.now() - timestamp) / 1000))}s ago`
+      : "Offline — the age of this view is unknown";
   } else {
     badge.hidden = true;
   }
@@ -205,6 +301,7 @@ async function updateLegInfo() {
     markCache(res.ok);
     if (!res.ok) { $("leg-info").textContent = "Could not load kit detail."; return; }
     const { kit, legs } = await res.json();
+    if (d) d.sourceCheckedAt = Date.now();
     // proj_legs SQL columns: leg_id, sender, dest, status, qty (dispatched
     // units as JSONB). The leg we can receive is the OPEN leg addressed to us.
     const open = (legs || []).filter((l) => l.status === "open" && l.dest === state.org);
@@ -284,29 +381,114 @@ function buildPayload() {
   };
 }
 
-// One reviewed op + payload per draft, persisted across reload/retry.
-async function ensureCase() {
-  const d = state.draft;
-  if (d.caseId) return d.caseId;
-  const payload = buildPayload();
+// One reviewed op + payload per case, persisted across reload/retry.
+// The case is created lazily at signing time for receive drafts, or
+// immediately for assessment/release/resume flows.
+async function ensureReviewCase() {
+  const r = state.review;
+  if (r.caseId) return r.caseId;
   const res = await api("/api/cases", {
     method: "POST",
-    body: { kind: payload.kind, kitId: payload.kitId, opId: payload.opId, args: payload.args },
+    body: { kind: r.kind, kitId: r.kitId, opId: r.opId, args: r.args },
   });
   const b = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(b.error || `case create failed (${res.status})`);
-  d.caseId = b.caseId;
-  await saveDraft();
-  return d.caseId;
+  r.caseId = b.caseId;
+  if (state.draft && r.kind === "receive") {
+    state.draft.caseId = r.caseId;
+    await saveDraft();
+  }
+  return r.caseId;
 }
 
 // ---------- sign-off -----------------------------------------------------------
 let reReviewNeeded = false;
 
+function openReview(review) {
+  state.review = review;
+  state.signdoc = null;
+  for (const field of ["unsigned-tx", "signed-doc", "txhash-in"]) $(field).value = "";
+  $("revdiff").hidden = true; // populated later by renderRevDiff when needed
+  const pv = $("preview");
+  pv.replaceChildren();
+  for (const [k, v] of review.rows) {
+    const dt = document.createElement("dt"); dt.textContent = k;
+    const dd = document.createElement("dd"); dd.textContent = v;
+    pv.append(dt, dd);
+  }
+  $("attest").textContent = review.attest;
+  $("sign-steps").hidden = true;
+  $("sign-status").textContent = review.statusNote || "";
+  $("do-sign").disabled = reReviewNeeded;
+  show("sign");
+}
+
+// Real before/after manifest diff: both revisions are immutable on the
+// realm, so the diff is fetched from the realm itself — never recomputed
+// from local guesses.
+async function renderRevDiff(kit, oldRev, newRev) {
+  const box = $("revdiff"), ul = $("revdiff-lines");
+  ul.replaceChildren();
+  $("re-review").disabled = true;
+  try {
+    const [a, b] = await Promise.all([
+      api(`/api/reader/manifest?kit=${encodeURIComponent(kit)}&rev=${oldRev}`),
+      api(`/api/reader/manifest?kit=${encodeURIComponent(kit)}&rev=${newRev}`),
+    ]);
+    markCache(a.ok && b.ok);
+    const oldM = a.ok ? await a.json() : null;
+    const newM = b.ok ? await b.json() : null;
+    if (!oldM?.digest || !newM?.digest || !Array.isArray(oldM.lines) || !Array.isArray(newM.lines)) {
+      throw new Error("Manifest revisions unavailable");
+    }
+    if (oldM.policy !== newM.policy) {
+      const li = document.createElement("li");
+      li.textContent = `Policy changed: ${oldM.policy} → ${newM.policy}`;
+      ul.appendChild(li);
+    }
+    const oldL = new Map((oldM?.lines || []).map((l) => [l.id, l]));
+    const newL = new Map((newM?.lines || []).map((l) => [l.id, l]));
+    const describe = (l) => l ? `${l.qty}× ${l.label || l.id}${Number(l.serialized) === 1 ? " · serialized" : ""}` : "";
+    for (const id of [...new Set([...oldL.keys(), ...newL.keys()])].sort()) {
+      const o = oldL.get(id), n = newL.get(id);
+      const li = document.createElement("li");
+      const span = document.createElement("span");
+      if (o && !n) {
+        span.textContent = `${id} removed — was ${describe(o)}`;
+        li.append(span, tag("bad", "removed"));
+      } else if (!o && n) {
+        span.textContent = `${id} added — now ${describe(n)}`;
+        li.append(span, tag("warn", "added"));
+      } else {
+        const same = o.qty === n.qty && o.label === n.label &&
+          o.serialized === n.serialized && o.unit === n.unit;
+        if (same) continue;
+        span.textContent = `${id} changed — ${describe(o)} → ${describe(n)}`;
+        li.append(span, tag("warn", "changed"));
+      }
+      ul.appendChild(li);
+    }
+    $("re-review").disabled = false;
+    if (!ul.children.length) {
+      const li = document.createElement("li");
+      li.textContent = `rev ${oldRev} → rev ${newRev}: no line changes (policy/digest only)`;
+      ul.appendChild(li);
+    }
+  } catch {
+    $("re-review").disabled = true;
+    markCache(false);
+    const li = document.createElement("li");
+    li.textContent = `rev ${oldRev} → rev ${newRev} (revision detail unavailable offline)`;
+    ul.appendChild(li);
+  }
+  box.hidden = false;
+}
+
 async function openSignOff() {
   const d = state.draft;
   if (!d || !d.leg) return;
-  reReviewNeeded = false;
+  reReviewNeeded = Boolean(d.pendingManifestReview);
+  const oldRev = d.pendingManifestReview?.from ?? d.manifestRev;
   try {
     const res = await api(`/api/kits/${encodeURIComponent(d.kit)}`);
     markCache(res.ok);
@@ -314,10 +496,9 @@ async function openSignOff() {
       const j = await res.json();
       const manifestRev = j.kit?.manifest_rev;
       if (d.manifestRev !== undefined && d.manifestRev !== manifestRev) {
+        d.pendingManifestReview = { from: oldRev, to: manifestRev };
         reReviewNeeded = true;
-        d.manifestRev = manifestRev;
         d.caseId = null; // the reviewed payload predates the change
-        await saveDraft();
       }
       d.manifestRev = manifestRev;
     }
@@ -325,47 +506,47 @@ async function openSignOff() {
     markCache(false);
   }
 
-  const pv = $("preview");
   const lines = Object.values(d.lines);
-  pv.replaceChildren();
-  const rows = [
-    ["Origin", d.origin || "(partner institution)"],
-    ["Destination", state.org || "(your institution)"],
-    ["Kit / leg", `${d.kit} · ${d.leg}`],
-    ["Operation id", d.opId],
-    ["Manifest version", d.manifestRev !== undefined ? `rev ${d.manifestRev}` : "unverified — offline"],
-    ["Accepted lines", lines.map((l) => `${l.code}×${l.serial ? 1 : l.count}`).join("; ") || "none"],
-    ["Missing lines", d.exceptions.filter((e) => e.kind === "missing").map((e) => e.line).join("; ") || "none"],
-    ["Condition flags", d.exceptions.filter((e) => e.kind !== "missing").map((e) => `${e.line}:${e.kind}`).join("; ") || "none"],
-    ["Signing account", state.addr || "not signed in"],
-    ["Network", state.network || "local dev chain"],
-  ];
-  for (const [k, v] of rows) {
-    const dt = document.createElement("dt"); dt.textContent = k;
-    const dd = document.createElement("dd"); dd.textContent = v;
-    pv.append(dt, dd);
+  openReview({
+    kind: "receive", opId: d.opId, kitId: d.kit,
+    args: buildPayload().args, caseId: d.caseId, after: "receive",
+    rows: [
+      ["Origin", d.origin || "(partner institution)"],
+      ["Destination", state.org || "(your institution)"],
+      ["Kit / leg", `${d.kit} · ${d.leg}`],
+      ["Operation id", d.opId],
+      ["Manifest version", d.manifestRev !== undefined
+        ? `rev ${d.manifestRev}${oldRev !== undefined && oldRev !== d.manifestRev ? ` (was rev ${oldRev})` : ""}`
+        : "unverified — offline"],
+      ["Accepted lines", lines.map((l) => `${l.code}×${l.serial ? 1 : l.count}`).join("; ") || "none"],
+      ["Missing lines", d.exceptions.filter((e) => e.kind === "missing").map((e) => e.line).join("; ") || "none"],
+      ["Condition flags", d.exceptions.filter((e) => e.kind !== "missing").map((e) => `${e.line}:${e.kind}`).join("; ") || "none"],
+      ["Signing account", state.addr || "not signed in"],
+      ["Network", state.network || "local dev chain"],
+    ],
+    attest:
+      "This signature attests that the listed components physically arrived " +
+      "at your institution in the stated condition, and records the exceptions " +
+      "shown as part of the kit's permanent custody record.",
+    statusNote: reReviewNeeded
+      ? "Manifest changed since drafting — re-review the diff above, then confirm."
+      : "",
+  });
+  if (reReviewNeeded) {
+    say("Manifest changed — re-review required");
+    await renderRevDiff(d.kit, oldRev, d.manifestRev);
+    await saveDraft();
   }
-  $("attest").textContent =
-    "This signature attests that the listed components physically arrived " +
-    "at your institution in the stated condition, and records the exceptions " +
-    "shown as part of the kit's permanent custody record.";
-  $("sign-steps").hidden = true;
-  $("do-sign").disabled = reReviewNeeded;
-  $("sign-status").textContent = reReviewNeeded
-    ? "Manifest changed since drafting — go back and re-review the draft before signing."
-    : "";
-  if (reReviewNeeded) say("Manifest changed — re-review required");
-  show("sign");
 }
 
-// Wallet/signature refusal leaves the stable route: the draft and case
+// Wallet/signature refusal leaves the stable route: the case and draft
 // survive, nothing is broadcast, staff can retry or go back.
 async function beginSigning() {
-  const d = state.draft;
-  if (!d || reReviewNeeded) return;
+  const requestedReview = state.review;
+  if (!requestedReview || reReviewNeeded) return;
   $("sign-status").textContent = "";
   try {
-    const caseId = await ensureCase();
+    const caseId = await ensureReviewCase();
     // Signature-request is the deliberate state change before any signing.
     const tr = await api(`/api/cases/${encodeURIComponent(caseId)}/transition`, {
       method: "POST", body: { state: "signature-request" },
@@ -377,6 +558,7 @@ async function beginSigning() {
     }
     const sg = await api(`/api/cases/${encodeURIComponent(caseId)}/signable`);
     const sb = await sg.json();
+    if (state.review !== requestedReview) return;
     if (!sg.ok) {
       $("sign-status").textContent = sb.error || `signable failed (${sg.status})`;
       return;
@@ -391,18 +573,17 @@ async function beginSigning() {
     say("Unsigned transaction ready");
     $("txhash-in").focus();
   } catch (e) {
-    $("sign-status").textContent = `Could not prepare the transaction — draft preserved. (${e.message})`;
+    $("sign-status").textContent = `Could not prepare the transaction — review preserved. (${e.message})`;
   }
 }
 
 async function markBroadcast() {
-  const d = state.draft;
   const txhash = $("txhash-in").value.trim();
-  if (!d?.caseId || !txhash) {
+  if (!state.review?.caseId || !txhash) {
     $("sign-status").textContent = "Paste the transaction hash from the external broadcast.";
     return;
   }
-  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/broadcast`, {
+  const res = await api(`/api/cases/${encodeURIComponent(state.review.caseId)}/broadcast`, {
     method: "POST", body: { txhash },
   });
   const b = await res.json().catch(() => ({}));
@@ -417,12 +598,11 @@ async function markBroadcast() {
 }
 
 async function relaySigned() {
-  const d = state.draft;
   let doc;
   try { doc = JSON.parse($("signed-doc").value); }
   catch { $("sign-status").textContent = "The signed document is not valid JSON."; return; }
-  if (!d?.caseId) return;
-  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/broadcast`, {
+  if (!state.review?.caseId) return;
+  const res = await api(`/api/cases/${encodeURIComponent(state.review.caseId)}/broadcast`, {
     method: "POST", body: { signedDoc: doc },
   });
   const b = await res.json().catch(() => ({}));
@@ -437,23 +617,65 @@ async function relaySigned() {
 }
 
 async function checkReceipt() {
-  const d = state.draft;
-  if (!d?.caseId) return;
-  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/confirm`, { method: "POST" });
+  const r = state.review;
+  if (!r?.caseId) return;
+  const res = await api(`/api/cases/${encodeURIComponent(r.caseId)}/confirm`, { method: "POST" });
   const b = await res.json().catch(() => ({}));
   if (b.state === "confirmed") {
-    d.signed = true;
-    await Drafts.save(d);
     $("sign-status").textContent =
-      `Receipt confirmed on chain (case ${d.caseId}). Draft is now immutable.`;
+      `Receipt confirmed on chain (case ${r.caseId}).`;
     say("Receipt confirmed on chain");
-    setTimeout(() => { state.draft = blankDraft(); renderDraft(); show("receive"); }, 1400);
+    if (r.after === "receive" && state.draft && state.draft.caseId === r.caseId) {
+      state.draft.signed = true;
+      await Drafts.save(state.draft);
+      setTimeout(() => { state.draft = blankDraft(); renderDraft(); show("receive"); }, 1400);
+    } else if (r.after === "assess" || r.after === "release") {
+      setTimeout(() => { loadCase(); show("case"); }, 1200);
+    }
   } else if (b.state === "unknown") {
     $("sign-status").textContent =
       "No chain receipt yet — the case stays recoverable in the Case view. " +
       "Broadcast the signed tx, then check again.";
   } else {
     $("sign-status").textContent = b.error || `confirmation state: ${b.state || res.status}`;
+  }
+}
+
+// ---------- private evidence attachment ---------------------------------------
+// Attachments are separate from the receipt: a failed upload never affects
+// case state, and a permitted user can always retry (T-024). The file bytes
+// are held in memory until the retry succeeds — nothing is sent on submit.
+let lastEvFile = null;
+async function uploadEvidence() {
+  const caseId = $("ev-case").value;
+  const file = $("ev-file").files[0] || lastEvFile;
+  if (!caseId) {
+    $("ev-status").textContent = "Choose the case this attachment belongs to.";
+    return;
+  }
+  if (!file) {
+    $("ev-status").textContent = "Choose a photo or PDF first.";
+    return;
+  }
+  lastEvFile = file;
+  try {
+    const res = await api(`/api/evidence?case=${encodeURIComponent(caseId)}`, {
+      method: "POST",
+      headers: { "content-type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const b = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(b.error || `upload failed (${res.status})`);
+    $("ev-status").textContent =
+      `Attachment stored privately (${b.bytes} bytes) — visible only to ${state.org} staff on this case.`;
+    $("ev-retry").hidden = true;
+    say("Attachment uploaded");
+  } catch (e) {
+    // The receipt is unaffected; only this attachment needs retrying.
+    $("ev-status").textContent =
+      `Upload failed — the receipt itself is unaffected. (${e.message})`;
+    $("ev-retry").hidden = false;
+    say("Attachment upload failed — retry available");
   }
 }
 
@@ -466,6 +688,11 @@ async function loadCaseList() {
     const res = await api("/api/cases");
     if (!res.ok) return;
     const { cases } = await res.json();
+    const evSel = $("ev-case");
+    evSel.replaceChildren();
+    for (const c of cases || []) {
+      evSel.appendChild(new Option(`${c.case_id} · ${c.kind} · ${c.state}`, c.case_id));
+    }
     for (const c of cases || []) {
       const li = document.createElement("li");
       const label = document.createElement("span");
@@ -484,6 +711,32 @@ async function loadCaseList() {
           loadCaseList();
         };
         li.appendChild(btn);
+        // Resume the exact reviewed case — the signable tx is rebuilt from
+        // the server-side payload, so nothing is re-derived locally.
+        const resume = document.createElement("button");
+        resume.className = "btn ghost";
+        resume.type = "button";
+        resume.textContent = "Resume signing";
+        resume.onclick = () => {
+          reReviewNeeded = false;
+          $("revdiff").hidden = true;
+          openReview({
+            kind: c.kind, opId: c.op_id, kitId: c.kit_id,
+            caseId: c.case_id, after: c.kind === "receive" ? "receive" : "assess",
+            rows: [
+              ["Case", `${c.case_id} · ${c.kind}`],
+              ["Kit", c.kit_id],
+              ["Operation id", c.op_id],
+              ["State", c.state],
+              ["Signing account", state.addr || "not signed in"],
+              ["Network", state.network || "local dev chain"],
+            ],
+            attest:
+              "This signature attests the reviewed payload held by this " +
+              "case — exactly what you reviewed, nothing re-derived.",
+          });
+        };
+        li.appendChild(resume);
       }
       ul.appendChild(li);
     }
@@ -501,52 +754,20 @@ async function loadCase() {
   if (!kit) return;
   const body = $("case-body");
   body.replaceChildren();
+  $("assess-panel").hidden = true;
+  $("release-kit").hidden = true;
   try {
     const calls = [
       api(`/api/reader/exceptions?id=${encodeURIComponent(kit)}`),
       api(`/api/reader/kit?id=${encodeURIComponent(kit)}`),
     ];
-    if (legId) calls.push(api(`/api/reader/leg?id=${encodeURIComponent(legId)}`));
-    const [excRes, kitRes, legRes] = await Promise.all(calls);
-    markCache(excRes.ok && kitRes.ok && (!legRes || legRes.ok));
+    const [excRes, kitRes] = await Promise.all(calls);
+    markCache(excRes.ok && kitRes.ok);
     const excs = (await excRes.json()).exceptions || [];
     const kitJ = await kitRes.json();
-    const leg = legRes ? await legRes.json() : null;
 
-    const statements = [];
-    if (leg && leg.openHeight) {
-      statements.push({
-        org: leg.sender, h: leg.openHeight,
-        text: `dispatched ${Object.entries(leg.qty || {}).map(([k, v]) => `${k}×${v}`).join(", ")}`,
-      });
-      if (leg.observed) {
-        statements.push({
-          org: leg.dest, h: leg.openHeight,
-          text: `received ${Object.entries(leg.accepted || {}).map(([k, v]) => `${k}×${v}`).join(", ") || "nothing"}`,
-        });
-      }
-      if (leg.closeHeight) {
-        statements.push({ org: leg.sender, h: leg.closeHeight, text: "leg closed" });
-      }
-    }
-    for (const e of excs) {
-      statements.push({
-        org: e.by, h: e.openHeight,
-        text: `${e.kind} exception on ${e.line} — ${e.reason} (${e.status})`,
-      });
-    }
-    statements.sort((a, b) => a.h - b.h);
-    for (const s of statements) {
-      const div = document.createElement("div");
-      div.className = "case-statement";
-      const h = document.createElement("h4"); h.textContent = s.org;
-      const p = document.createElement("p"); p.textContent = s.text;
-      const meta = document.createElement("p");
-      meta.className = "case-meta";
-      meta.textContent = `block height ${s.h}`;
-      div.append(h, p, meta);
-      body.appendChild(div);
-    }
+
+    void showKitTimeline(body, kit, legId);
     const disputed = excs.filter((e) => e.status === "open");
     if (disputed.length) {
       const p = document.createElement("p");
@@ -558,28 +779,135 @@ async function loadCase() {
     const np = document.createElement("p");
     np.className = "case-meta";
     np.textContent = `Next authorized role: ${
-      kitJ.hold ? "owner assessment required" :
-      kitJ.available ? "kit available — no action" : "awaiting receiving desk"}`;
+      kitJ.needsAssessment ? "owner assessment required" :
+      kitJ.available ? "kit available — no action" :
+      kitJ.activeLeg ? "receiving desk at destination" :
+      kitJ.hold ? "held — awaiting movement" : "no action pending"}`;
     body.appendChild(np);
-    if (state.org && kitJ.owner === state.org && kitJ.needsAssessment) {
-      const b = document.createElement("button");
-      b.className = "btn primary";
-      b.textContent = "Open assessment";
-      b.onclick = () => {
-        state.draft = blankDraft();
-        state.draft.kit = kit;
-        saveDraft();
-        show("receive");
-      };
-      body.appendChild(b);
+
+    // Owner assessment: requires the realm's needsAssessment flag AND the
+    // caller to be the owner — the realm enforces the same check on the
+    // signature, so a non-owner sees no control and a forged call fails.
+    const isOwner = state.org && kitJ.owner === state.org;
+    const panel = $("assess-panel");
+    const relBtn = $("release-kit");
+    panel.hidden = !(isOwner && kitJ.needsAssessment);
+    if (isOwner && kitJ.needsAssessment) {
+      const ul = $("assess-lines");
+      ul.replaceChildren();
+      for (const ln of kitJ.lines || []) {
+        const li = document.createElement("li");
+        const span = document.createElement("span");
+        const heldByOwner = (ln.held && ln.held[kitJ.owner]) || 0;
+        span.textContent =
+          `${ln.id} — required ${ln.required}, owner holds ${heldByOwner}` +
+          ` · last assessment: ${ln.assessment || "pending"}`;
+        const sel = document.createElement("select");
+        sel.dataset.line = ln.id;
+        sel.setAttribute("aria-label", `assessment for ${ln.id}`);
+        for (const code of ["ok", "damaged", "disputed"]) {
+          sel.appendChild(new Option(code, code));
+        }
+        li.append(span, sel);
+        ul.appendChild(li);
+      }
+      panel.dataset.kit = kit;
+      $("assess-status").textContent = "";
     }
+    // Release: owner only, all lines serviceable, custody home, no open
+    // exceptions or active leg. The realm re-checks all of it on the tx.
+    const releaseReady = isOwner && kitJ.hold && !kitJ.available &&
+      !kitJ.needsAssessment && !kitJ.activeLeg &&
+      (kitJ.openExceptions || []).length === 0 &&
+      (kitJ.lines || []).every((ln) => ln.assessment === "serviceable" &&
+        ((ln.held && ln.held[kitJ.owner]) || 0) >= ln.required);
+    relBtn.hidden = !releaseReady;
+    if (releaseReady) relBtn.dataset.kit = kit;
   } catch (e) {
     markCache(false);
+    $("assess-panel").hidden = true;
+    $("release-kit").hidden = true;
     const p = document.createElement("p");
     p.className = "hint";
     p.textContent = `Could not load case: ${e.message}`;
     body.appendChild(p);
   }
+}
+
+// ---------- owner assessment + release ----------------------------------------
+// Same real pipeline as receive: reviewed payload -> case -> unsigned tx ->
+// staff signs with the institution key -> broadcast -> realm receipt -> confirm.
+async function reviewAssessment() {
+  const kit = $("assess-panel").dataset.kit;
+  const picks = [...$("assess-lines").querySelectorAll("select[data-line]")]
+    .map((s) => `${s.dataset.line}:${s.value}`);
+  if (!kit || !picks.length) {
+    $("assess-status").textContent = "Nothing to assess.";
+    return;
+  }
+  const opId = newOpId();
+  const assessments = picks.join(";");
+  const res = await api("/api/cases", {
+    method: "POST",
+    body: { kind: "assess", kitId: kit, opId,
+            args: { opID: opId, kitID: kit, assessments } },
+  });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $("assess-status").textContent = b.error || `case refused (${res.status})`;
+    return;
+  }
+  reReviewNeeded = false;
+  $("revdiff").hidden = true;
+  openReview({
+    kind: "assess", opId, kitId: kit, caseId: b.caseId, after: "assess",
+    args: { opID: opId, kitID: kit, assessments },
+    rows: [
+      ["Kit", kit],
+      ["Operation id", opId],
+      ["Per-line outcome", picks.join("; ")],
+      ["Signing account", state.addr || "not signed in"],
+      ["Network", state.network || "local dev chain"],
+    ],
+    attest:
+      "This signature attests that you, as the owning institution, " +
+      "physically inspected each returned component and record the " +
+      "serviceability outcome shown as part of the kit's permanent " +
+      "custody record.",
+  });
+}
+
+async function reviewRelease() {
+  const kit = $("release-kit").dataset.kit;
+  if (!kit) return;
+  const opId = newOpId();
+  const res = await api("/api/cases", {
+    method: "POST",
+    body: { kind: "release", kitId: kit, opId,
+            args: { opID: opId, kitID: kit } },
+  });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    say(`Release case refused: ${b.error || res.status}`);
+    return;
+  }
+  reReviewNeeded = false;
+  $("revdiff").hidden = true;
+  openReview({
+    kind: "release", opId, kitId: kit, caseId: b.caseId, after: "release",
+    args: { opID: opId, kitID: kit },
+    rows: [
+      ["Kit", kit],
+      ["Operation id", opId],
+      ["Effect", "kit becomes available for dispatch"],
+      ["Signing account", state.addr || "not signed in"],
+      ["Network", state.network || "local dev chain"],
+    ],
+    attest:
+      "This signature attests that every required component is held by " +
+      "your institution and assessed serviceable, and returns the kit " +
+      "to circulation.",
+  });
 }
 
 // Populate the leg selector whenever the case kit changes.
@@ -656,14 +984,17 @@ async function completeLogin() {
   state.draft = drafts.find((d) => !d.signed && d.scope === scopeKey()) || blankDraft();
   renderDraft();
   if (state.draft.kit) $("kit-sel").value = state.draft.kit;
-  show("receive");
+  show("queue");
 }
 
 async function logout() {
-  await api("/api/session", { method: "DELETE" });
-  clearSession();
-  await loadKits();
-  say("Signed out");
+  try {
+    const res = await api("/api/session", { method: "DELETE" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    clearSession();
+  } catch {
+    if (state.token) say("Could not end the session. Reconnect and retry sign-out.");
+  }
 }
 
 // ---------- wiring -----------------------------------------------------------
@@ -723,17 +1054,42 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("kit-sel").addEventListener("change", updateLegInfo);
   $("signoff").addEventListener("click", openSignOff);
+  for (const t of ["incoming", "outgoing", "exceptions", "audit"]) {
+    $(`qtab-${t}`).addEventListener("click", () => {
+      state.queueTab = t;
+      for (const u of ["incoming", "outgoing", "exceptions", "audit"]) {
+        $(`qtab-${u}`).setAttribute("aria-selected", String(u === t));
+      }
+      renderQueueTab();
+    });
+  }
+  $("assess-review").addEventListener("click", reviewAssessment);
+  $("release-kit").addEventListener("click", reviewRelease);
+  // Deliberate confirmation: signing stays blocked until the staff member
+  // explicitly re-reviews the persisted before/after revision diff.
+  $("re-review").addEventListener("click", async () => {
+    if (!state.draft?.pendingManifestReview || $("re-review").disabled) return;
+    delete state.draft.pendingManifestReview;
+    await saveDraft();
+    reReviewNeeded = false;
+    $("do-sign").disabled = false;
+    $("revdiff").hidden = true;
+    $("sign-status").textContent = "Re-review confirmed — you may sign.";
+    say("Re-review confirmed");
+  });
   $("back-draft").addEventListener("click", () => { show("receive"); });
   $("do-sign").addEventListener("click", beginSigning);
   $("mark-broadcast").addEventListener("click", markBroadcast);
   $("relay-btn").addEventListener("click", relaySigned);
   $("check-receipt").addEventListener("click", checkReceipt);
   $("back-sign").addEventListener("click", () => { show("receive"); });
+  $("ev-upload").addEventListener("click", uploadEvidence);
+  $("ev-retry").addEventListener("click", uploadEvidence);
   $("download-tx").addEventListener("click", () => {
     const blob = new Blob([$("unsigned-tx").value], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${state.draft?.caseId || "tx"}-unsigned.json`;
+    a.download = `${state.review?.caseId || state.draft?.caseId || "tx"}-unsigned.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   });
@@ -748,12 +1104,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("logout").addEventListener("click", logout);
   $("logout").hidden = !state.token;
 
-  document.addEventListener("focusin", (e) => {
-    if (state.view === "receive" &&
-        !/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)) {
-      $("scan").focus();
-    }
-  });
 
   try {
     const res = await fetch("/api/health");
@@ -771,4 +1121,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   }
+
+  // A shared desk returns to sign-in after logout. Normal entry opens the queue.
+  show(location.hash === "#session" && !state.token ? "session" : "queue");
 });

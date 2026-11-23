@@ -3,15 +3,18 @@
   "generated": "local-build",
   "statusValues": {
     "PASS": "verified by the cited automated check",
-    "PENDING": "implemented; the cited real-browser or restore-path verification has not run yet \u2014 do not treat as passed",
-    "BLOCKED": "cannot be run locally \u2014 external authority/resource missing",
+    "PENDING": "implemented; the cited real-browser or restore-path verification has not run yet — do not treat as passed",
+    "BLOCKED": "cannot be run locally — external authority/resource missing",
     "NOT_RUN": "no evidence yet"
   },
   "suites": {
     "realm": "GNOROOT=.tools/src/gno .tools/bin/gno test -v realm/gno.land/r/kittransit/custody (19/19 PASS, lint clean)",
-    "app": "npm test \u2014 node --test, disposable PostgreSQL database per file (33/33 PASS)",
-    "realChain": "../verification/kit-local-probe.py \u2014 signed gnokey txs on gnodev; 13 tx/height 27 journey, 17 tx/height 35 recovery",
-    "qa": "KIT_QA_PAGE_LIMIT=2 | KIT_QA_RELEASE_PROVENANCE=1 | KIT_QA_LOGIN=1 via ../verification/kit-projection-run.sh"
+    "app": "npm test — node --test, disposable PostgreSQL database per file (40/40 PASS)",
+    "realChain": "../verification/kit-local-probe.py — signed gnokey txs on gnodev; 13 tx/height 27 journey, 17 tx/height 35 recovery",
+    "qa": "KIT_QA_PAGE_LIMIT=2 | KIT_QA_RELEASE_PROVENANCE=1 | KIT_QA_LOGIN=1 via ../verification/kit-projection-run.sh",
+    "browserQa": "npm run browser:qa — scripts/browser-qa.mjs: disposable gnodev chain + scratch PG + API + headless Chrome (all checks PASS, .local/browser-qa/browser-qa-result.json)",
+    "restore": "../verification/kit-restore-result.json + kit-restore-regression.log (user-owned snapshot tooling)",
+    "cleanCheckout": "../verification/kit-release-ei1v9ije/test.log at revision 8200e37 (33/33 + local E2E, 18 tx h37)"
   },
   "cases": [
     {
@@ -20,7 +23,7 @@
       "status": "PASS",
       "evidence": [
         "realm: TestT001_OrgEnrollAndKeyRebind",
-        "realChain: EnrollOrg\u00d72 signed receipts h27"
+        "realChain: EnrollOrg×2 signed receipts h27"
       ]
     },
     {
@@ -145,28 +148,28 @@
     {
       "id": "T-016",
       "title": "Five offline scans survive reload and reappear on reconnect",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "desk: web/drafts.js IndexedDB store scoped to org/addr/device, web/sw.js shell-only cache"
-      ],
-      "note": "Draft persistence implemented; automated browser reload run not yet executed"
+        "browserQa: .local/browser-qa/browser-qa-result.json — T-016: shell served offline from sw cache, 5 scans entered while offline, 6 IndexedDB draft lines restored after reload, cached-data badge with age shown",
+        "desk: web/drafts.js IndexedDB store scoped to org/addr/device, web/sw.js navigation fallback"
+      ]
     },
     {
       "id": "T-017",
       "title": "Realm revision change before reconnect blocks stale draft with diff",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "desk: openSignOff refetches manifest_rev and announces diff",
+        "browserQa: T-017 — real AmendManifest between draft and sign-off; chain-derived rev 1→2 diff shown, signing blocked, block persists across leave/reopen (pendingManifestReview on the draft), explicit re-review confirmation re-enables signing (browser-qa-result.json)",
+        "desk: openSignOff refetches manifest_rev; renderRevDiff fetches immutable rev N / N+1 from /api/reader/manifest",
         "realm: Dispatch expectedRev binding"
-      ],
-      "note": "Diff + stale-revision refusal implemented; browser-level run not yet executed"
+      ]
     },
     {
       "id": "T-018",
       "title": "Refused wallet prompt leaves stable route; only confirmed receipt applies",
       "status": "PASS",
       "evidence": [
-        "app: test/confirm.test.ts \u2014 confirmed requires verified digest-matched realm receipt; /transition cannot set confirmed",
+        "app: test/confirm.test.ts — confirmed requires verified digest-matched realm receipt; /transition cannot set confirmed",
         "realChain+Chrome: refused-signing path leaves case recoverable; only GetOp receipt confirms (kit-local-receipt.json)"
       ]
     },
@@ -199,12 +202,12 @@
     {
       "id": "T-022",
       "title": "Six-item receipt keyboard-only, single announcements, focus retained",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "realChain+Chrome: kit-receive.mjs via KIT_QA_RECEIVE_UI probe \u2014 B sign-in (real gnokey), kit/leg picker, 5 scans + lens exception, unsigned tx export, external broadcast, /confirm confirmed at 390px; kit-local-receipt.json browserReceive",
+        "browserQa: T-022 keyboard-only receipt at 1280px AND 390px — 5 scans + 1 exception row via Tab/Enter only, exactly one announcement per scan, focus retained on scan lane (browser-qa-result.json)",
+        "browserQa: full receive journey — real gnokey sign + broadcast + /confirm => confirmed",
         "desk: web/index.html aria-live + labels, app.js focus management"
-      ],
-      "note": "Phone-width browser journey verified end-to-end on a real chain (13 txs, confirmed receipt). Desktop-width pass and explicit single-announcement check remain pending."
+      ]
     },
     {
       "id": "T-023",
@@ -221,19 +224,21 @@
       "title": "Failed post-confirmation upload keeps receipt; permitted retry succeeds",
       "status": "PASS",
       "evidence": [
-        "app: test/evidence.test.ts upload validation + retry dedup"
+        "app: test/evidence.test.ts upload validation + retry dedup",
+        "browserQa: post-confirmation upload failure surfaced without touching the confirmed receipt; retry succeeded (browser-qa-result.json)",
+        "desk: case view evidence box with explicit retry"
       ]
     },
     {
       "id": "T-025",
       "title": "Snapshot restore + overlapping reindex converge with realm query",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "app: test/reindex.test.ts \u2014 rebuild atomicity, delivery history, empty-projection detection",
-        "app: test/indexer.test.ts \u2014 overlapping-height convergence",
-        "src/reindex.ts \u2014 rebuild + realm-feed inventory verification"
-      ],
-      "note": "Reindex determinism verified: single-transaction rebuild, outbox delivery history preserved, mid-feed failure rolls back cleanly (test/reindex.test.ts). Snapshot + object restore QA is owned by the tools/snapshot.sh work \u2014 pending that evidence."
+        "app: test/reindex.test.ts — rebuild atomicity, delivery history preserved, empty-projection detection",
+        "restore: ../verification/kit-restore-result.json — restored case + 68 evidence bytes, existing DB protected, realm converged AVAILABLE at h37",
+        "restore: ../verification/kit-restore-regression.log — 33/33 + local E2E after restore",
+        "src/reindex.ts — single-tx rebuild + realm-feed inventory verification"
+      ]
     },
     {
       "id": "T-026",
@@ -255,12 +260,12 @@
     {
       "id": "T-028",
       "title": "Fresh checkout + two local wallet keys reproduce the journey via separate reader",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "realChain: two disposable gnokey homes, independent GetKit/GetLeg/GetOp reads",
+        "cleanCheckout: ../verification/kit-release-ei1v9ije/test.log — fresh checkout of rev 8200e37, 33/33 tests + local E2E, 18 signed tx, final height 37, available=true",
+        "browserQa: scripts/browser-qa.mjs self-contained two-signer run (disposable keys/chain/db) — B receipt + A assess/release all confirmed (browser-qa-result.json)",
         "web/public.html direct-realm reader"
-      ],
-      "note": "Clean-checkout E2E script is owned by the scripts/e2e-local.sh work \u2014 pending."
+      ]
     },
     {
       "id": "T-029",
@@ -272,18 +277,18 @@
     {
       "id": "T-030",
       "title": "Catalogue export + accessible browser journey on installed release reproduce state",
-      "status": "PENDING",
+      "status": "PASS",
       "evidence": [
-        "app: test/catalogue.test.ts partner CSV file round trip",
-        "README quick start",
-        "qa: kit-projected-final.csv"
-      ],
-      "note": "CSV + state reproduction verified; full installed-release browser journey not yet automated"
+        "app: test/catalogue.test.ts partner CSV file round trip + per-branch delivery isolation",
+        "browserQa: catalogue drain sent 2, partner.csv exports kit rows (browser-qa-result.json)",
+        "browserQa: accessible journey — keyboard-only + offline reload + phone width + queue tabs + owner assess/release + shared-desk logout (browser-qa-result.json, desk-390.png, owner-release-1280.png)",
+        "docs/evidence/release-report.md"
+      ]
     }
   ],
   "summary": {
-    "PASS": 23,
-    "PENDING": 6,
+    "PASS": 29,
+    "PENDING": 0,
     "BLOCKED": 1,
     "NOT_RUN": 0
   }

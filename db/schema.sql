@@ -150,6 +150,23 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_dedup ON outbox (kit_id, event_seq, state);
 
+-- Per-branch delivery state. The outbox feed is shared across institutions;
+-- each branch materializes its own catalogue_items view, so sent/conflict/
+-- retry history must be tracked per (outbox row, branch) — otherwise the
+-- first branch to drain would consume transitions for every branch.
+-- outbox.status is a rollup: 'conflict' if any delivery needs review,
+-- 'sent' when every recorded delivery succeeded, 'pending' otherwise.
+CREATE TABLE IF NOT EXISTS outbox_delivery (
+    outbox_seq BIGINT NOT NULL REFERENCES outbox(seq),
+    branch     TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','sent','conflict','manual_review')),
+    attempts   INT NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (outbox_seq, branch)
+);
+
 -- Signed-intent lifecycle for the staff desk (distinct draft / signature
 -- request / broadcast / unknown / confirmed states).
 CREATE TABLE IF NOT EXISTS cases (
