@@ -1,0 +1,15 @@
+# handoff bundle is documentation only, never product source
+.devin-handoff/
+
+# isolated toolchain (built locally, see docs/deploy/local.md)
+.tools/
+
+# disposable local runtime: keys, db data, evidence objects, logs
+.local/
+
+# node
+node_modules/
+*.log
+
+# os
+.DS_Store
