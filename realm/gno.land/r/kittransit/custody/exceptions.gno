@@ -141,6 +141,9 @@ func ConfirmRecovery(cur realm, opID, claimID string) string {
 		}
 		b.Unlocated -= cl.Qty
 		b.Held[cl.Finder] += cl.Qty
+		if cl.Finder == k.Owner {
+			b.Assessment = AssessPending
+		}
 		cl.Status = ClaimConfirmed
 	}
 	cl.ConfirmH = h
@@ -214,7 +217,7 @@ func WriteOffUnit(cur realm, opID, kitID, lineID string, qty int64, reason strin
 }
 
 // AssessReturn records the owner's inspection outcome per line:
-// "line:code" where code is serviceable|damaged|pending.
+// "line:code" where code is ok|damaged|disputed.
 func AssessReturn(cur realm, opID, kitID, assessments string) string {
 	validID(kitID)
 	k := mustKit(kitID)

@@ -68,6 +68,8 @@ func TestT002_RevokedKeyRejected(cur realm, t *testing.T) {
 	if l.Accepted["body"] != 1 {
 		fail(t, "replacement receipt not recorded")
 	}
+	// Reissue B2's custodian grant (fresh operation id) for later tests.
+	GrantRole(cross(cur), "op-gB2re", "B", B2, RoleCustodian)
 }
 
 // The last remaining admin cannot be revoked, keeping the org recoverable.

@@ -168,6 +168,11 @@ func ReceiveDelta(cur realm, opID, legID, accepted, conds, missing, reason strin
 			delete(b.Transit, legID)
 		}
 		b.Held[dest] += q
+		if dest == kits[leg.Kit].Owner {
+			// Units back at the owner require a fresh assessment for the
+			// next borrowing cycle — prior serviceability never carries over.
+			b.Assessment = AssessPending
+		}
 		kits[leg.Kit].NeedsAssessment = true
 	}
 	for line, code := range cond {
@@ -237,10 +242,18 @@ func StartReturn(cur realm, opID, kitID, qtys string) string {
 	if k.ActiveLeg != "" {
 		panic("kittransit: kit already has an active leg")
 	}
-	prevLeg := lastLegID(kitID)
-	if prevLeg == "" || legs[prevLeg].Kind != LegOutbound || legs[prevLeg].Status != LegClosed {
-		panic("kittransit: requires a closed outbound leg")
+	// Anchor to the originating outbound line: the most recent closed
+	// outbound leg that delivered custody to this sender. Supplementary
+	// returns (e.g. a recovered unit sent back after the first return leg
+	// closed) reuse the same origin instead of demanding the immediately
+	// previous leg be outbound. The return destination is the org that
+	// delivered the material.
+	origin := findReturnOrigin(kitID, sender)
+	if origin == nil {
+		panic("kittransit: no originating outbound line for " + sender)
 	}
+	prevLeg := origin.ID
+	dest := origin.Sender
 	qty := parseQtyMap(qtys, false)
 	if len(qty) == 0 {
 		panic("kittransit: empty return")
@@ -248,7 +261,7 @@ func StartReturn(cur realm, opID, kitID, qtys string) string {
 	h := chainHeight()
 	legID := nextID("leg")
 	leg := &Leg{
-		ID: legID, Kit: kitID, Kind: LegReturn, Sender: sender, Dest: k.Owner,
+		ID: legID, Kit: kitID, Kind: LegReturn, Sender: sender, Dest: dest,
 		ManifestRev: k.curManifest().Rev, Prev: prevLeg, Qty: map[string]int64{},
 		Accepted: map[string]int64{}, ClosedUnreceived: map[string]int64{},
 		ReportedMissing: map[string]int64{}, Status: LegOpen, OpenH: h,
@@ -286,6 +299,19 @@ func lastLegID(kitID string) string {
 				bestSeq = seqOf(l.ID)
 				best = l.ID
 			}
+		}
+	}
+	return best
+}
+
+// findReturnOrigin returns the most recent closed outbound leg that
+// delivered custody to org — the originating line a return anchors to.
+func findReturnOrigin(kitID, org string) *Leg {
+	var best *Leg
+	for _, l := range legs {
+		if l.Kit == kitID && l.Kind == LegOutbound && l.Dest == org &&
+			l.Status == LegClosed && (best == nil || seqOf(l.ID) > seqOf(best.ID)) {
+			best = l
 		}
 	}
 	return best
