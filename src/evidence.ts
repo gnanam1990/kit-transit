@@ -50,7 +50,7 @@ export async function storeEvidence(
   // attachments are scoped to an authorized case, never free-floating.
   const kase = await pool.query(
     `SELECT org_id FROM cases WHERE case_id=$1`, [caseId]);
-  if (kase.rowCount === 0) throw new EvidenceError("unknown case", "missing");
+  if ((kase.rowCount ?? 0) === 0) throw new EvidenceError("unknown case", "missing");
   if (kase.rows[0].org_id !== sess.org_id) {
     throw new EvidenceError("access denied", "denied");
   }

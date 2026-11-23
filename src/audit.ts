@@ -69,7 +69,7 @@ export async function lookupOperation(
  */
 export async function exportCase(pool: Pool, kitId: string): Promise<Record<string, unknown>> {
   const kit = await pool.query(`SELECT * FROM proj_kits WHERE kit_id=$1`, [kitId]);
-  if (kit.rowCount === 0) throw new Error("unknown kit");
+  if ((kit.rowCount ?? 0) === 0) throw new Error("unknown kit");
   const k = kit.rows[0] as any;
   const lines = (await pool.query(
     `SELECT line_id, issued, held, transit_total, unlocated, quarantine, retired, assessment

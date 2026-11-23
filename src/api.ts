@@ -15,7 +15,7 @@ import {
   type Session,
 } from "./sessions.ts";
 import { storeEvidence, fetchEvidence, EvidenceError } from "./evidence.ts";
-import { parseCsv, importCsv, exportCsv, drainOutbox } from "./catalogue.ts";
+import { parseCsv, importCsv, exportCsv, partnerCsv, drainOutbox } from "./catalogue.ts";
 import { exportCase, lookupOperation, compareProjectionToRealm } from "./audit.ts";
 import { caseDigest } from "./digest.ts";
 
@@ -185,11 +185,11 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         json(res, 200, { kits: rows.rows });
         return;
       }
-      let m: RegExp | null;
+      let m: RegExpMatchArray | null;
       if ((m = path.match(/^\/api\/kits\/([^/]+)$/)) && method === "GET") {
         if (!(await sessionOf(req, pool))) { json(res, 401, { error: "session required" }); return; }
         const kit = await pool.query(`SELECT * FROM proj_kits WHERE kit_id=$1`, [m[1]]);
-        if (kit.rowCount === 0) { json(res, 404, { error: "unknown kit" }); return; }
+        if ((kit.rowCount ?? 0) === 0) { json(res, 404, { error: "unknown kit" }); return; }
         const lines = await pool.query(
           `SELECT * FROM proj_lines WHERE kit_id=$1 ORDER BY line_id`, [m[1]]);
         const legs = await pool.query(
@@ -283,7 +283,7 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
             `UPDATE cases SET state='confirmed', receipt=$2, updated_at=now()
              WHERE case_id=$1 AND state IN ('broadcast','unknown')`,
             [m[1], JSON.stringify(op)]);
-          if (up.rowCount === 0) {
+          if ((up.rowCount ?? 0) === 0) {
             json(res, 409, {
               error: `case is ${kase.state}; only broadcast or unknown may confirm`,
             });
@@ -357,6 +357,16 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
         const csv = await exportCsv(pool);
+        res.writeHead(200, { "content-type": "text/csv; charset=utf-8" });
+        res.end(csv);
+        return;
+      }
+      // Partner file interchange: the caller's own branch state in the
+      // agreed re-importable schema.
+      if (path === "/api/catalogue/partner.csv" && method === "GET") {
+        const s = await sessionOf(req, pool);
+        if (!s) { json(res, 401, { error: "session required" }); return; }
+        const csv = await partnerCsv(pool, s.org_id);
         res.writeHead(200, { "content-type": "text/csv; charset=utf-8" });
         res.end(csv);
         return;

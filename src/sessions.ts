@@ -24,7 +24,7 @@ async function hasActiveGrant(pool: Pool, org: string, addr: string): Promise<bo
   const g = await pool.query(
     `SELECT 1 FROM proj_grants WHERE org_id=$1 AND addr=$2 AND active=true LIMIT 1`,
     [org, addr]);
-  return g.rowCount > 0;
+  return (g.rowCount ?? 0) > 0;
 }
 
 export interface Challenge {
@@ -100,7 +100,7 @@ export async function redeemChallenge(
     const g = await c.query(
       `SELECT 1 FROM proj_grants WHERE org_id=$1 AND addr=$2 AND active=true LIMIT 1`,
       [row.org_id, row.addr]);
-    if (g.rowCount === 0) {
+    if ((g.rowCount ?? 0) === 0) {
       throw new AuthError("grant no longer active", "grant");
     }
     const token = randomBytes(24).toString("hex");

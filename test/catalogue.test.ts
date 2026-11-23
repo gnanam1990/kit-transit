@@ -1,7 +1,10 @@
 import { test, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { provisionDb, disposeDb, freshDb } from "./helpers.ts";
-import { parseCsv, importCsv, exportCsv, resolveQuarantine, drainOutbox } from "../src/catalogue.ts";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseCsv, importCsv, exportCsv, partnerCsv, resolveQuarantine, drainOutbox } from "../src/catalogue.ts";
 
 const pool = await provisionDb("catalogue");
 beforeEach(() => freshDb(pool));
@@ -64,4 +67,37 @@ test("export marks held/available explicitly and round-trips", async () => {
   const csv = await exportCsv(pool);
   assert.match(csv, /kit-1,A,HELD,1/);
   assert.match(csv, /kit-2,A,AVAILABLE,2/);
+});
+
+// Real partner file round trip: state flows realm events -> outbox ->
+// branch catalogue -> partner CSV file on disk -> re-import, preserving
+// barcode/item_ref/state/seq keyed identity.
+test("partner CSV file round trips through a real file", async () => {
+  // Populate the branch catalogue through the outbox drain path.
+  await pool.query(
+    `INSERT INTO outbox (kit_id, state, event_seq, height, version) VALUES
+      ('kit-camera','HELD',3,3,1), ('kit-projector','AVAILABLE',7,7,1)`);
+  const drained = await drainOutbox(pool, "A");
+  assert.equal(drained.sent, 2);
+
+  // Write the partner file to disk, read it back, re-import into a clean
+  // catalogue partition (different branch namespace simulates the partner).
+  const csv = await partnerCsv(pool, "A");
+  const dir = mkdtempSync(join(tmpdir(), "kit-csv-"));
+  const file = join(dir, "partner-delivery.csv");
+  writeFileSync(file, csv);
+
+  const back = parseCsv(readFileSync(file, "utf8"));
+  assert.equal(back.length, 2);
+  // Partner receives under its own branch id — remap and import.
+  const remapped = back.map((r) => ({ ...r, branch: "B" }));
+  const imp = await importCsv(pool, remapped);
+  assert.equal(imp.applied, 2);
+  const rows = await pool.query(
+    `SELECT barcode, item_ref, state, seq FROM catalogue_items
+     WHERE branch='B' ORDER BY barcode`);
+  assert.deepEqual(
+    rows.rows.map((r) => [r.barcode, r.item_ref, r.state, Number(r.seq)]),
+    [["kit-camera", "kit-camera", "HELD", 3],
+     ["kit-projector", "kit-projector", "AVAILABLE", 7]]);
 });

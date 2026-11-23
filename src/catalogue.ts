@@ -68,7 +68,7 @@ export async function importCsv(pool: Pool, rows: CsvRow[]): Promise<ImportResul
       res.quarantined++;
       res.conflicts.push({
         barcode: row.barcode,
-        reason: q.rowCount ? `collision with bound item ${cur.item_ref}` : "already quarantined",
+        reason: (q.rowCount ?? 0) ? `collision with bound item ${cur.item_ref}` : "already quarantined",
       });
       continue;
     }
@@ -101,13 +101,29 @@ export async function exportCsv(pool: Pool): Promise<string> {
   return out.join("\n") + "\n";
 }
 
+/**
+ * Partner file interchange: emit a branch's catalogue state in the agreed
+ * import schema so the same file a partner receives can be re-imported —
+ * a genuine round trip keyed by barcode/item_ref/seq.
+ */
+export async function partnerCsv(pool: Pool, branch: string): Promise<string> {
+  const rows = await pool.query(
+    `SELECT barcode, item_ref, state, seq FROM catalogue_items
+     WHERE branch=$1 ORDER BY barcode`, [branch]);
+  const out = ["branch,barcode,item_ref,state,seq"];
+  for (const r of rows.rows) {
+    out.push(`${branch},${r.barcode},${r.item_ref},${r.state},${r.seq}`);
+  }
+  return out.join("\n") + "\n";
+}
+
 /** Resolve a quarantined barcode explicitly: rebind or reject. */
 export async function resolveQuarantine(
   pool: Pool, id: number, action: "rebind" | "reject", itemRef: string, state: "HELD" | "AVAILABLE", seq: number,
 ): Promise<void> {
   const q = await pool.query(
     `SELECT * FROM barcode_quarantine WHERE id=$1 AND status='quarantined'`, [id]);
-  if (q.rowCount === 0) throw new Error("no quarantined record");
+  if ((q.rowCount ?? 0) === 0) throw new Error("no quarantined record");
   const row = q.rows[0];
   if (action === "rebind") {
     await pool.query(
