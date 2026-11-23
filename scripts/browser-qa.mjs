@@ -453,6 +453,7 @@ try {
   const qExc = await page.locator("#queue-body").innerText();
   assert.match(qExc, /lens/, "exception names the missing line");
   assert.match(qExc, /missing/, "missing label");
+  assert.match(qExc, /by B/, "signed exception attributed to the receiving institution");
   results.checks["queue incoming+exceptions (B)"] = {
     incoming: 2, exceptions: 1, oldestOutstanding: "tube",
   };

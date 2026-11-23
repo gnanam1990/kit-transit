@@ -292,7 +292,15 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
           `SELECT k.kit_id, k.manifest_rev FROM proj_kits k
            WHERE k.owner=$1 AND k.needs_assessment ORDER BY k.kit_id`, [org]);
         const excs = await pool.query(
-          `SELECT e.* FROM proj_exceptions e WHERE e.status='open' AND (
+          `SELECT e.*, reporter.org AS raised_by
+           FROM proj_exceptions e
+           LEFT JOIN LATERAL (
+             SELECT min(org) AS org FROM realm_events v
+             WHERE v.kind='exception' AND v.kit=e.kit AND v.leg=e.leg AND v.line=e.line
+               AND v.height=e.open_height AND split_part(v.data,';',1)='kind=' || e.kind
+             HAVING count(DISTINCT org)=1
+           ) reporter ON true
+           WHERE e.status='open' AND (
              EXISTS (SELECT 1 FROM proj_kits k WHERE k.kit_id=e.kit AND k.owner=$1)
              OR EXISTS (SELECT 1 FROM proj_legs l
                         WHERE l.kit=e.kit AND (l.sender=$1 OR l.dest=$1)))
@@ -316,8 +324,8 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const outgoing = legsOut.rows.map((l: any) => legRow(l, "out"));
         const exceptions = excs.rows.map((e: any) => ({
           excId: e.exc_id, kit: e.kit, leg: e.leg, line: e.line,
-          kind: e.kind, qty: Number(e.qty), reason: e.reason, by: e.by,
-          lastHeight: Math.max(Number(e.open_height), kitH.get(e.kit) ?? 0),
+          kind: e.kind, qty: Number(e.qty), reason: e.reason, by: e.raised_by,
+          lastHeight: Number(e.open_height),
           label: e.kind === "missing" ? "missing"
                : e.kind === "damaged" ? "damaged" : e.kind,
         }));

@@ -115,8 +115,15 @@ async function loadQueue() {
     renderQueueTab();
   } catch {
     markCache(false);
-    $("queue-sub").textContent = "Offline — showing the last known queue.";
-    if (state.queue) renderQueueTab();
+    if (state.queue) {
+      $("queue-sub").textContent = "Offline — showing the last known queue.";
+      renderQueueTab();
+    } else {
+      $("queue-sub").textContent = "Offline — reconnect to load the institution queue. Unsigned drafts are in Receive.";
+      for (const tab of ["incoming","outgoing","exceptions","audit"]) {
+        $("qtab-" + tab).textContent = tab[0].toUpperCase() + tab.slice(1) + " (unknown)";
+      }
+    }
   }
 }
 
@@ -148,7 +155,7 @@ function renderQueueTab() {
       li.appendChild(label);
     } else if (tab === "exceptions") {
       label.textContent =
-        `${r.kit} · ${r.line} — ${r.reason || "(no reason)"} · by ${r.by} · h${r.lastHeight}`;
+        `${r.kit} · ${r.line} — ${r.reason || "(no reason)"} · ${r.by ? "by " + r.by : "reporting institution unknown"} · h${r.lastHeight}`;
       li.appendChild(label);
       li.appendChild(tag(r.kind === "missing" ? "bad" : "warn", r.label));
     } else if (r.row === "inspection") {
