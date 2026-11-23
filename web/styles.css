@@ -1,0 +1,105 @@
+:root {
+  --ink: #17202b;
+  --paper: #f7f5f0;
+  --accent: #1f3a5f;
+  --accent-ink: #ffffff;
+  --warn: #8a4b08;
+  --ok: #1e6b3a;
+  --bad: #8a1f1f;
+  --line: #d8d2c4;
+  --min-tap: 44px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+.skip {
+  position: absolute; left: -9999px; top: 0;
+  background: var(--accent); color: var(--accent-ink); padding: .5em 1em;
+}
+.skip:focus { left: 0; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  clip: rect(0 0 0 0); overflow: hidden; white-space: nowrap;
+}
+.topbar {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  background: var(--accent); color: var(--accent-ink);
+  padding: .5rem 1rem;
+}
+.brand { font-size: 1.1rem; margin: 0; }
+.topbar nav { display: flex; gap: .25rem; flex-wrap: wrap; }
+.topbar nav button, .topbar nav a {
+  min-height: var(--min-tap); padding: 0 .9rem;
+  background: transparent; color: var(--accent-ink);
+  border: 1px solid transparent; border-radius: 6px;
+  font: inherit; text-decoration: none; display: inline-flex; align-items: center;
+  cursor: pointer;
+}
+.topbar nav button[aria-current="page"], .topbar nav a:hover, .topbar nav button:hover {
+  background: rgba(255,255,255,.18);
+}
+.who { margin: 0 0 0 auto; font-size: .9rem; }
+.netline { margin: .25rem 1rem; font-size: .85rem; color: #555; min-height: 1.2em; }
+.cache-badge {
+  margin: .25rem 1rem; padding: .35rem .7rem; border-radius: 6px;
+  background: #efe4bf; border: 1px solid var(--warn); color: var(--warn);
+  font-size: .9rem;
+}
+main { padding: 0 1rem 3rem; max-width: 46rem; }
+.view h2 { margin-top: 1rem; }
+label { display: block; font-weight: 600; margin-top: .9rem; }
+input, select, textarea {
+  width: 100%; padding: .6rem; margin-top: .2rem;
+  border: 1.5px solid var(--line); border-radius: 6px;
+  font: inherit; background: #fff; color: var(--ink);
+}
+input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible {
+  outline: 3px solid #2f6fb2; outline-offset: 1px;
+}
+.hint { font-size: .9rem; color: #555; margin: .25rem 0 .5rem; }
+.scanbox { border: 1.5px solid var(--line); border-radius: 10px; padding: 1rem; background: #fff; }
+.scanbox input { font-size: 1.15rem; letter-spacing: .04em; }
+.btn {
+  min-height: var(--min-tap); min-width: var(--min-tap);
+  padding: .5rem 1.1rem; margin-top: .8rem;
+  border: 1.5px solid var(--accent); border-radius: 8px;
+  background: #fff; color: var(--accent); font: inherit; font-weight: 600;
+  cursor: pointer;
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.ghost { border-color: var(--line); color: var(--ink); }
+.btn[disabled] { opacity: .45; cursor: not-allowed; }
+.draftbar { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.draftbar p { margin: 0; font-size: .9rem; }
+.lines { list-style: none; padding: 0; }
+.lines li {
+  display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+  padding: .6rem .8rem; margin: .4rem 0;
+  background: #fff; border: 1.5px solid var(--line); border-radius: 8px;
+}
+.lines .tag { font-size: .8rem; border-radius: 999px; padding: .15rem .6rem; }
+.tag.ok { background: #e1f1e4; color: var(--ok); border: 1px solid var(--ok); }
+.tag.warn { background: #faecd4; color: var(--warn); border: 1px solid var(--warn); }
+.tag.bad { background: #f6dede; color: var(--bad); border: 1px solid var(--bad); }
+.exc { margin-top: 1.2rem; padding: .8rem; border: 1.5px dashed var(--warn); border-radius: 8px; }
+.exc summary { min-height: var(--min-tap); display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+.preview { background: #fff; border: 1.5px solid var(--line); border-radius: 8px; padding: 1rem; }
+.preview dt { font-weight: 600; margin-top: .5rem; }
+.preview dd { margin: 0; }
+.attest { font-weight: 600; border-left: 4px solid var(--accent); padding-left: .8rem; }
+.actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+.signsteps { margin-top: 1.2rem; border-top: 1.5px solid var(--line); padding-top: .8rem; }
+.case-statement { border: 1.5px solid var(--line); border-radius: 8px; background: #fff; padding: .8rem; margin: .6rem 0; }
+.case-statement h4 { margin: 0 0 .3rem; }
+.case-meta { font-size: .85rem; color: #555; }
+@media (max-width: 480px) {
+  main { padding: 0 .6rem 3rem; }
+  .topbar { padding: .5rem .6rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

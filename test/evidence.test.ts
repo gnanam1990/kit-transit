@@ -22,6 +22,12 @@ async function enroll(org: string, addr: string) {
      ON CONFLICT DO NOTHING`, [org, addr]);
 }
 
+async function mkCase(caseId: string, org: string) {
+  await pool.query(
+    `INSERT INTO cases (case_id, org_id, kind, kit_id, op_id, payload, nonce, signer)
+     VALUES ($1,$2,'receive','kit-1','op-1','{}','n','x')`, [caseId, org]);
+}
+
 // T-003 + T-023: a staff reader from another institution following a copied
 // link receives no private object and no identifying metadata.
 test("cross-tenant fetch denied; identifying metadata not returned", async () => {
@@ -29,6 +35,7 @@ test("cross-tenant fetch denied; identifying metadata not returned", async () =>
   await enroll("B", "addr-b1");
   const aSess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
   const bSess = (await issueSession(pool, "addr-b1", "B", "dev2", 3600))!;
+  await mkCase("case-1", "A");
 
   const stored = await storeEvidence(pool, dir, aSess, "case-1", PNG);
   const got = await fetchEvidence(pool, dir, aSess, stored.objectId);
@@ -50,6 +57,7 @@ test("cross-tenant fetch denied; identifying metadata not returned", async () =>
 test("revoked session loses access on next read", async () => {
   await enroll("A", "addr-a1");
   const sess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  await mkCase("case-2", "A");
   const stored = await storeEvidence(pool, dir, sess, "case-2", PDF);
   await fetchEvidence(pool, dir, sess, stored.objectId); // allowed now
   await revokeSession(pool, sess.token);
@@ -68,6 +76,7 @@ test("revoked session loses access on next read", async () => {
 test("upload validation rejects bad content; retry succeeds after failure", async () => {
   await enroll("A", "addr-a1");
   const sess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  await mkCase("case-3", "A");
 
   await assert.rejects(storeEvidence(pool, dir, sess, "case-3", Buffer.from("not an image")),
     (e: EvidenceError) => e.code === "mime");
@@ -83,4 +92,36 @@ test("upload validation rejects bad content; retry succeeds after failure", asyn
   assert.equal(stored.bytes, PNG.length);
   const again = await storeEvidence(pool, dir, sess, "case-3", PNG);
   assert.equal(again.objectId, stored.objectId); // content-addressed dedup
+});
+
+// Case relationship is mandatory: uploads bind to an existing case owned
+// by the caller's org, and identical bytes under a second case produce a
+// distinct, separately authorized object.
+test("attachments require an authorized case; per-case scoping", async () => {
+  await enroll("A", "addr-a1");
+  await enroll("B", "addr-b1");
+  const aSess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  await mkCase("case-a", "A");
+  await mkCase("case-b", "A");
+  await mkCase("case-foreign", "B");
+
+  // No such case -> rejected.
+  await assert.rejects(
+    storeEvidence(pool, dir, aSess, "case-ghost", PNG),
+    (e: EvidenceError) => e.code === "missing");
+  // Case owned by another org -> denied.
+  await assert.rejects(
+    storeEvidence(pool, dir, aSess, "case-foreign", PNG),
+    (e: EvidenceError) => e.code === "denied");
+
+  const one = await storeEvidence(pool, dir, aSess, "case-a", PNG);
+  const two = await storeEvidence(pool, dir, aSess, "case-b", PNG);
+  assert.notEqual(one.objectId, two.objectId,
+    "identical bytes under different cases are distinct objects");
+  const metaA = await pool.query(
+    `SELECT case_id FROM evidence_objects WHERE object_id=$1`, [one.objectId]);
+  const metaB = await pool.query(
+    `SELECT case_id FROM evidence_objects WHERE object_id=$1`, [two.objectId]);
+  assert.equal(metaA.rows[0].case_id, "case-a");
+  assert.equal(metaB.rows[0].case_id, "case-b");
 });

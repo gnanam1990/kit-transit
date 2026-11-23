@@ -46,8 +46,19 @@ export async function storeEvidence(
   if (!mime || !ALLOWED_MIME.has(mime)) {
     throw new EvidenceError("unsupported or mismatched media type", "mime");
   }
+  // Case relationship is required and must belong to the caller's org:
+  // attachments are scoped to an authorized case, never free-floating.
+  const kase = await pool.query(
+    `SELECT org_id FROM cases WHERE case_id=$1`, [caseId]);
+  if (kase.rowCount === 0) throw new EvidenceError("unknown case", "missing");
+  if (kase.rows[0].org_id !== sess.org_id) {
+    throw new EvidenceError("access denied", "denied");
+  }
   const sha = createHash("sha256").update(buf).digest("hex");
-  const objectId = `obj-${sha.slice(0, 24)}`;
+  // Object ids carry the case binding: identical bytes attached under two
+  // different cases produce two distinct, separately authorized objects.
+  const caseHash = createHash("sha256").update(caseId).digest("hex").slice(0, 8);
+  const objectId = `obj-${sha.slice(0, 16)}-${caseHash}`;
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${objectId}.bin`), buf);
   await pool.query(

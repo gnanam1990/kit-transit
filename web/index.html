@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f3a5f">
+<title>Kit Transit — Staff Desk</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header class="topbar">
+  <h1 class="brand">Kit Transit</h1>
+  <nav aria-label="Desk">
+    <button data-nav="receive" aria-current="page">Receive</button>
+    <button data-nav="case">Case</button>
+    <button data-nav="session">Sign in</button>
+    <a href="public.html">Public view</a>
+  </nav>
+  <p id="who" class="who" aria-live="polite"></p>
+</header>
+
+<p id="net" class="netline" role="status"></p>
+<div id="announce" class="sr-only" role="status" aria-live="polite"></div>
+<div id="cache-badge" class="cache-badge" hidden role="note"></div>
+
+<main id="main">
+  <!-- Receiving station -->
+  <section id="view-receive" class="view" aria-labelledby="receive-h">
+    <h2 id="receive-h">Receiving desk</h2>
+    <form id="scan-form" class="scanbox">
+      <label for="scan">Scan or type a barcode, then press Enter</label>
+      <p class="hint" id="scan-hint">Serialized items count once per scan — repeated
+        scans of the same serial are merged, not added.</p>
+      <input id="scan" name="scan" inputmode="text" autocomplete="off"
+             autocapitalize="none" spellcheck="false"
+             aria-describedby="scan-hint" required>
+      <button type="submit" class="btn">Add scan</button>
+      <button type="button" id="lookup" class="btn ghost">Manual lookup…</button>
+    </form>
+
+    <div class="draftbar">
+      <p id="draft-state" role="status"></p>
+      <button type="button" id="undo" class="btn ghost" disabled>Undo last scan</button>
+      <button type="button" id="discard" class="btn ghost" disabled>Discard draft</button>
+    </div>
+
+    <h3>Counted lines</h3>
+    <ul id="lines" class="lines" aria-live="polite"></ul>
+
+    <details id="exception-panel" class="exc">
+      <summary>Report an exception</summary>
+      <label for="exc-kind">Exception type</label>
+      <select id="exc-kind">
+        <option value="missing">missing</option>
+        <option value="damaged">damaged</option>
+        <option value="discrepancy">discrepancy</option>
+      </select>
+      <label for="exc-line">Line</label>
+      <input id="exc-line" placeholder="line id e.g. lens">
+      <label for="exc-reason">Reason</label>
+      <input id="exc-reason" placeholder="what the staff member observed">
+      <button type="button" id="exc-add" class="btn ghost">Add to receipt</button>
+    </details>
+
+    <button type="button" id="signoff" class="btn primary" disabled>
+      Review and sign receipt
+    </button>
+  </section>
+
+  <!-- Sign-off / wallet preview -->
+  <section id="view-sign" class="view" hidden aria-labelledby="sign-h">
+    <h2 id="sign-h">Review before signing</h2>
+    <p class="hint">You are signing an institutional attestation on the chain.
+      Review every line — this statement becomes part of the kit's permanent
+      custody record.</p>
+    <dl id="preview" class="preview"></dl>
+    <p id="attest" class="attest"></p>
+    <div class="actions">
+      <button id="do-sign" class="btn primary">Sign with institution key</button>
+      <button id="back-draft" class="btn ghost">Back to draft</button>
+    </div>
+    <div id="sign-steps" class="signsteps" hidden>
+      <ol>
+        <li>Copy the unsigned transaction below into
+          <code>gnokey sign</code> (offline flags are fine).</li>
+        <li>Paste the resulting <code>pub_key</code> and
+          <code>signature</code> values.</li>
+      </ol>
+      <label for="unsigned-tx">Unsigned transaction (for gnokey)</label>
+      <textarea id="unsigned-tx" readonly rows="7"></textarea>
+      <label for="sig-pubkey">pub_key value (base64)</label>
+      <input id="sig-pubkey" autocomplete="off" spellcheck="false">
+      <label for="sig-value">signature (base64)</label>
+      <input id="sig-value" autocomplete="off" spellcheck="false">
+      <button id="confirm-sign" class="btn primary">Submit signed receipt</button>
+      <p id="sign-status" role="status"></p>
+    </div>
+  </section>
+
+  <!-- Case view -->
+  <section id="view-case" class="view" hidden aria-labelledby="case-h">
+    <h2 id="case-h">Custody case</h2>
+    <label for="case-kit">Kit</label>
+    <input id="case-kit" placeholder="kit id e.g. camera">
+    <button id="case-load" class="btn">Load case</button>
+    <div id="case-body"></div>
+  </section>
+
+  <!-- Session -->
+  <section id="view-session" class="view" hidden aria-labelledby="session-h">
+    <h2 id="session-h">Staff sign-in</h2>
+    <p class="hint">Sign-in proves control of an enrolled institution key —
+      a public address alone is never enough. The desk builds a one-use
+      challenge; sign it with gnokey and paste the signature.</p>
+    <form id="challenge-form">
+      <label for="login-org">Institution</label>
+      <input id="login-org" required placeholder="e.g. A">
+      <label for="login-addr">Your gno address</label>
+      <input id="login-addr" required placeholder="g1…" autocomplete="off" spellcheck="false">
+      <label for="login-device">This device/desk</label>
+      <input id="login-device" required placeholder="e.g. returns-desk-1">
+      <button class="btn primary" type="submit">Get sign-in challenge</button>
+    </form>
+    <div id="challenge-steps" hidden>
+      <label for="ch-tx">Sign this transaction with gnokey</label>
+      <textarea id="ch-tx" readonly rows="8"></textarea>
+      <p class="hint">Example:
+        <code>gnokey sign -tx-path ch.json -chainid &lt;network&gt;
+          -account-number 0 -account-sequence 0 -output-document sig.json</code>
+      </p>
+      <label for="ch-pubkey">pub_key value (base64)</label>
+      <input id="ch-pubkey" autocomplete="off" spellcheck="false">
+      <label for="ch-sig">signature (base64)</label>
+      <input id="ch-sig" autocomplete="off" spellcheck="false">
+      <button id="ch-submit" class="btn primary">Complete sign-in</button>
+      <p id="login-status" role="status"></p>
+    </div>
+    <button id="logout" class="btn ghost" hidden>Sign out</button>
+  </section>
+</main>
+
+<script src="drafts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

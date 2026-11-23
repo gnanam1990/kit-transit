@@ -17,6 +17,7 @@ import {
 import { storeEvidence, fetchEvidence, EvidenceError } from "./evidence.ts";
 import { parseCsv, importCsv, exportCsv, drainOutbox } from "./catalogue.ts";
 import { exportCase, lookupOperation, compareProjectionToRealm } from "./audit.ts";
+import { caseDigest } from "./digest.ts";
 
 const REALM_FN: Record<string, string> = {
   dispatch: "Dispatch",
@@ -233,11 +234,13 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const kase = c.rows[0] as any;
         if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
         const to = String(b.state ?? "");
+        // "confirmed" is deliberately absent: only /confirm can move a case
+        // there, and only on a verified matching chain receipt.
         const legal: Record<string, string[]> = {
           draft: ["signature-request"],
           "signature-request": ["broadcast", "draft", "failed"],
-          broadcast: ["unknown", "confirmed", "failed"],
-          unknown: ["confirmed", "broadcast", "failed"],
+          broadcast: ["unknown", "failed"],
+          unknown: ["broadcast", "failed"],
           confirmed: [], failed: [],
         };
         if (!(legal[kase.state] ?? []).includes(to)) {
@@ -255,12 +258,37 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const c = await pool.query(`SELECT * FROM cases WHERE case_id=$1`, [m[1]]);
         const kase = c.rows[0] as any;
         if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
-        // Confirmation is the realm receipt, never a transport response.
+        // Confirmation is the realm receipt, never a transport response —
+        // and only a receipt whose op digest matches the reviewed payload.
         const op = await lookupOperation(pool, chain, kase.org_id, kase.op_id) as any;
         if (op.status === "confirmed") {
-          await pool.query(
-            `UPDATE cases SET state='confirmed', receipt=$2, updated_at=now() WHERE case_id=$1`,
+          const payload = typeof kase.payload === "string"
+            ? JSON.parse(kase.payload) : kase.payload;
+          const expected = caseDigest(kase, cfg.network, chain.realmPath());
+          const identityOk =
+            op.org === kase.org_id && op.op === kase.op_id &&
+            op.kind === payload.func && op.signer === kase.signer &&
+            op.digest === expected;
+          if (!identityOk) {
+            json(res, 409, {
+              error: "chain receipt does not match the reviewed operation",
+              expected: { kind: payload.func, digest: expected },
+              observed: { kind: op.kind, digest: op.digest, signer: op.signer },
+            });
+            return;
+          }
+          // Conditional expected-state guard: only broadcast/unknown cases
+          // may confirm; the update is a no-op otherwise (idempotent).
+          const up = await pool.query(
+            `UPDATE cases SET state='confirmed', receipt=$2, updated_at=now()
+             WHERE case_id=$1 AND state IN ('broadcast','unknown')`,
             [m[1], JSON.stringify(op)]);
+          if (up.rowCount === 0) {
+            json(res, 409, {
+              error: `case is ${kase.state}; only broadcast or unknown may confirm`,
+            });
+            return;
+          }
           json(res, 200, { state: "confirmed", receipt: op });
         } else {
           if (kase.state === "broadcast") {
@@ -312,6 +340,16 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
         const rows = parseCsv((await readBody(req)).toString());
+        // Catalogue state is branch-scoped: a desk may only write rows for
+        // its own institution's branch.
+        const foreign = rows.filter((r) => r.branch !== s.org_id);
+        if (foreign.length > 0) {
+          json(res, 403, {
+            error: `import contains ${foreign.length} row(s) for other branches`,
+            branches: [...new Set(foreign.map((r) => r.branch))],
+          });
+          return;
+        }
         json(res, 200, await importCsv(pool, rows));
         return;
       }
@@ -326,8 +364,8 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       if (path === "/api/catalogue/drain" && method === "POST") {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
-        const branch = url.searchParams.get("branch") ?? s.org_id;
-        json(res, 200, await drainOutbox(pool, branch));
+        // Branch is always the caller's org — no cross-branch drains.
+        json(res, 200, await drainOutbox(pool, s.org_id));
         return;
       }
 

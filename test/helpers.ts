@@ -61,7 +61,11 @@ export class FakeChain implements Pick<ChainClient, "status" | "events" | "query
   excs: Record<string, any[]> = {};
   claims: Record<string, any[]> = {};
   orgs: Record<string, any> = {};
+  ops: Record<string, any> = {}; // key: "org/opId"
 
+  realmPath(): string {
+    return "gno.land/r/kittransit/custody";
+  }
   async status(): Promise<ChainStatus> {
     return { network: this.network, height: this.height, epoch: this.epoch };
   }
@@ -89,6 +93,12 @@ export class FakeChain implements Pick<ChainClient, "status" | "events" | "query
     if (fn.startsWith("GetOrg(")) {
       const id = fn.slice(8, -2);
       return this.orgs[id] ?? { error: "unknown org" };
+    }
+    if (fn.startsWith("GetOp(")) {
+      // GetOp("A","op-1") — split on the quoted args.
+      const args = fn.match(/GetOp\("([^"]*)","([^"]*)"\)/);
+      if (args) return this.ops[`${args[1]}/${args[2]}`] ?? { status: "unknown" };
+      return { status: "unknown" };
     }
     return { raw: "{}" };
   }
