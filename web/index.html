@@ -29,6 +29,13 @@
   <!-- Receiving station -->
   <section id="view-receive" class="view" aria-labelledby="receive-h">
     <h2 id="receive-h">Receiving desk</h2>
+    <div class="legpicker">
+      <label for="kit-sel">Kit and active leg to receive</label>
+      <select id="kit-sel" disabled>
+        <option value="">— sign in to load incoming kits —</option>
+      </select>
+      <p id="leg-info" class="hint" role="status"></p>
+    </div>
     <form id="scan-form" class="scanbox">
       <label for="scan">Scan or type a barcode, then press Enter</label>
       <p class="hint" id="scan-hint">Serialized items count once per scan — repeated
@@ -83,18 +90,40 @@
     </div>
     <div id="sign-steps" class="signsteps" hidden>
       <ol>
-        <li>Copy the unsigned transaction below into
-          <code>gnokey sign</code> (offline flags are fine).</li>
-        <li>Paste the resulting <code>pub_key</code> and
-          <code>signature</code> values.</li>
+        <li>Save the unsigned transaction below and sign it with the
+          institution key: <code>cp tx.json signed.json</code>, then <code>gnokey sign -tx-path signed.json
+          -chainid &lt;network&gt; -account-number N -account-sequence M &lt;key-name&gt;</code></li>
+        <li>Broadcast it — either yourself
+          (<code>gnokey broadcast -remote &lt;rpc&gt; signed.json</code>)
+          and paste the transaction hash below, or paste the whole signed
+          document and let the configured relay transmit it.</li>
+        <li>Press <em>Check chain receipt</em> — a case is confirmed only
+          when the realm's own receipt for this exact operation is visible.</li>
       </ol>
-      <label for="unsigned-tx">Unsigned transaction (for gnokey)</label>
-      <textarea id="unsigned-tx" readonly rows="7"></textarea>
-      <label for="sig-pubkey">pub_key value (base64)</label>
-      <input id="sig-pubkey" autocomplete="off" spellcheck="false">
-      <label for="sig-value">signature (base64)</label>
-      <input id="sig-value" autocomplete="off" spellcheck="false">
-      <button id="confirm-sign" class="btn primary">Submit signed receipt</button>
+      <label for="unsigned-tx">Unsigned transaction (for gnokey sign)</label>
+      <textarea id="unsigned-tx" readonly rows="9"></textarea>
+      <div class="actions">
+        <button id="download-tx" class="btn ghost" type="button">
+          Download unsigned tx</button>
+        <button id="copy-tx" class="btn ghost" type="button">
+          Copy to clipboard</button>
+      </div>
+      <label for="txhash-in">Transaction hash (after external broadcast)</label>
+      <input id="txhash-in" autocomplete="off" spellcheck="false"
+             placeholder="base64 hash printed by gnokey broadcast">
+      <button id="mark-broadcast" class="btn" type="button">
+        Record broadcast</button>
+      <label for="signed-doc">Or paste the signed document (relay, if configured)</label>
+      <textarea id="signed-doc" rows="6" autocomplete="off" spellcheck="false"
+                placeholder='{"msg":[…],"signatures":[…]}'></textarea>
+      <button id="relay-btn" class="btn" type="button">
+        Relay signed document</button>
+      <div class="actions">
+        <button id="check-receipt" class="btn primary" type="button">
+          Check chain receipt</button>
+        <button id="back-sign" class="btn ghost" type="button">
+          Keep as draft and go back</button>
+      </div>
       <p id="sign-status" role="status"></p>
     </div>
   </section>
@@ -104,7 +133,11 @@
     <h2 id="case-h">Custody case</h2>
     <label for="case-kit">Kit</label>
     <input id="case-kit" placeholder="kit id e.g. camera">
+    <label for="case-leg">Leg</label>
+    <select id="case-leg"></select>
     <button id="case-load" class="btn">Load case</button>
+    <h3>My institution's open cases</h3>
+    <ul id="case-list" class="lines"></ul>
     <div id="case-body"></div>
   </section>
 

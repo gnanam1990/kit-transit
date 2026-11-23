@@ -20,8 +20,14 @@ export async function compareProjectionToRealm(
     if (!realmKit.error) diffs.push({ field: "kit", projection: null, realm: "present" });
     return diffs;
   }
+  // Canonical JSON for flat maps (org->qty): key order differs between a
+  // jsonb column and a realm object, so compare on sorted keys.
+  const canon = (v: any) => {
+    if (!v || typeof v !== "object") return v ?? {};
+    return Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)));
+  };
   const cmp = (f: string, pv: unknown, rv: unknown) => {
-    if (JSON.stringify(pv) !== JSON.stringify(rv)) {
+    if (JSON.stringify(canon(pv)) !== JSON.stringify(canon(rv))) {
       diffs.push({ field: f, projection: pv, realm: rv });
     }
   };
@@ -29,13 +35,18 @@ export async function compareProjectionToRealm(
   cmp("manifestRev", Number(p.manifest_rev), realmKit.manifestRev);
   cmp("available", p.available, realmKit.available);
   cmp("hold", p.hold, realmKit.hold);
+  cmp("needsAssessment", p.needs_assessment, realmKit.needsAssessment);
+  cmp("activeLeg", p.active_leg ?? "", realmKit.activeLeg ?? "");
   const lines = await pool.query(`SELECT * FROM proj_lines WHERE kit_id=$1`, [kitId]);
   for (const ln of (realmKit.lines ?? []) as any[]) {
     const pl = lines.rows.find((r: any) => r.line_id === ln.id);
     cmp(`line.${ln.id}.issued`, pl ? Number(pl.issued) : null, ln.issued);
+    cmp(`line.${ln.id}.held`, pl?.held ?? {}, ln.held ?? {});
+    cmp(`line.${ln.id}.transit`, pl ? Number(pl.transit_total) : null, ln.inTransit ?? 0);
     cmp(`line.${ln.id}.unlocated`, pl ? Number(pl.unlocated) : null, ln.unlocated);
     cmp(`line.${ln.id}.quarantine`, pl ? Number(pl.quarantine) : null, ln.quarantine);
     cmp(`line.${ln.id}.retired`, pl ? Number(pl.retired) : null, ln.retired);
+    cmp(`line.${ln.id}.assessment`, pl?.assessment ?? "none", ln.assessment ?? "none");
   }
   return diffs;
 }

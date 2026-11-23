@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Kit Transit — two-institution library-kit custody on a Gno realm",
-  "engines": { "node": ">=22.18" },
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "migrate": "node src/migrate.ts",
     "indexer": "node src/indexer.ts --daemon",
@@ -13,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "stack:up": "scripts/dev-stack.sh up",
     "stack:down": "scripts/dev-stack.sh down",
-    "e2e": "scripts/e2e-local.sh"
+    "e2e": "scripts/e2e-local.sh",
+    "reindex": "node src/reindex.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"

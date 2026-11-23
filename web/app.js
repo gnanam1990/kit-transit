@@ -5,6 +5,12 @@
 //   - sign-off shows the full attestation; refusal leaves a stable route
 //   - reconnect re-verifies and diffs the draft before signing
 //   - cached views carry a badge + age; colours always have text labels
+//   - the desk never holds keys: it exports an unsigned tx for gnokey,
+//     then waits for the realm's own receipt before confirming anything
+//
+// Scanner race note: the scan input is cleared synchronously in the submit
+// handler BEFORE any async IndexedDB work, so rapid successive scans cannot
+// be lost to a mid-flight save.
 
 "use strict";
 
@@ -13,8 +19,10 @@ const state = {
   token: localStorage.getItem("kt.token") || null,
   org: localStorage.getItem("kt.org") || null,
   addr: localStorage.getItem("kt.addr") || null,
+  device: localStorage.getItem("kt.device") || null,
   network: null,
-  draft: null,        // { id, kit, leg, scans:[], lines:{}, exceptions:[] }
+  draft: null,
+  kits: [],
   view: "receive",
 };
 
@@ -24,13 +32,12 @@ async function api(path, opts = {}) {
   if (state.token) headers.authorization = `Bearer ${state.token}`;
   if (opts.body && !headers["content-type"]) {
     headers["content-type"] = "application/json";
+    if (typeof opts.body !== "string") opts.body = JSON.stringify(opts.body);
   }
   const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
   if (res.status === 401) {
     say("Session expired — please sign in again");
-    state.token = null;
-    localStorage.removeItem("kt.token");
-    renderWho();
+    clearSession();
     show("session");
     throw new Error("unauthorized");
   }
@@ -41,8 +48,17 @@ function say(msg) { $("announce").textContent = msg; }
 
 function renderWho() {
   $("who").textContent = state.addr
-    ? `${state.org} · ${state.addr.slice(0, 10)}…`
+    ? `${state.org} · ${state.addr.slice(0, 10)}… · ${state.device || "desk"}`
     : "not signed in";
+}
+
+function clearSession() {
+  state.token = null;
+  for (const k of ["kt.token", "kt.org", "kt.addr", "kt.device"]) {
+    localStorage.removeItem(k);
+  }
+  $("logout").hidden = true;
+  renderWho();
 }
 
 // ---------- views -----------------------------------------------------------
@@ -56,34 +72,47 @@ function show(name) {
     else b.removeAttribute("aria-current");
   });
   if (name === "receive") $("scan").focus();
+  if (name === "case") loadCaseList();
 }
 
 // ---------- cached data badge ------------------------------------------------
-let lastFetchAt = 0, lastFetchOk = true;
+let lastFetchAt = 0;
 function markCache(ok) {
-  lastFetchOk = ok;
   if (ok) lastFetchAt = Date.now();
   const badge = $("cache-badge");
-  if (!ok && lastFetchAt) {
-    const age = Math.max(1, Math.round((Date.now() - lastFetchAt) / 1000));
+  if (!ok) {
     badge.hidden = false;
-    badge.textContent = `Cached view — data is ${age}s old, not live`;
+    badge.textContent = lastFetchAt
+      ? `Cached view — data is ${Math.max(1, Math.round((Date.now() - lastFetchAt) / 1000))}s old, not live`
+      : "Offline — showing last known state";
   } else {
-    badge.hidden = ok;
-    if (!ok) badge.textContent = "Offline — showing last known state";
+    badge.hidden = true;
   }
 }
 
-// ---------- drafts ------------------------------------------------------------
+// ---------- drafts (scoped to org/account/device) ------------------------------
+// A draft belongs to one sign-in scope only: org + address + device. Drafts
+// from another scope are never loaded into this desk's working state.
+function scopeKey() {
+  return `${state.org || "anon"}:${state.addr || "none"}:${state.device || "desk"}`;
+}
+
+function newOpId() {
+  // One stable op per draft — generated once, persisted, reused on retry.
+  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function blankDraft() {
   return {
-    id: `draft-${Date.now()}`,
-    kit: "", leg: "", scans: [], lines: {}, exceptions: [], signed: false,
+    id: `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    scope: scopeKey(),
+    kit: "", leg: "", origin: "", manifestRev: undefined,
+    opId: newOpId(), caseId: null,
+    scans: [], lines: {}, exceptions: [], signed: false,
   };
 }
 
 function normalizedLines(draft) {
-  // Counted lines: serialized scans merge by id; plain barcodes count.
   const out = {};
   for (const s of draft.scans) {
     const key = s.serial ? `${s.code}#${s.serial}` : s.code;
@@ -95,42 +124,117 @@ function normalizedLines(draft) {
 
 async function saveDraft() {
   if (!state.draft) return;
+  state.draft.scope = scopeKey();
   state.draft.lines = normalizedLines(state.draft);
   await Drafts.save(state.draft);
   renderDraft();
+}
+
+function tag(className, text) {
+  const s = document.createElement("span");
+  s.className = `tag ${className}`;
+  s.textContent = text;
+  return s;
 }
 
 function renderDraft() {
   const d = state.draft;
   if (!d) return;
   $("draft-state").textContent =
-    `Draft ${d.signed ? "(signed — immutable)" : "unsaved signature"} · ` +
+    `Draft ${d.signed ? "(signed — immutable)" : "unsigned"} · ` +
+    `${d.kit ? `kit ${d.kit} · leg ${d.leg || "?"} · ` : "no kit selected · "}` +
     `${d.scans.length} raw scans · ${Object.keys(d.lines).length} counted lines`;
   $("undo").disabled = d.signed || d.scans.length === 0;
   $("discard").disabled = d.signed;
-  $("signoff").disabled = d.signed || Object.keys(d.lines).length === 0;
+  $("signoff").disabled = d.signed || !d.leg || Object.keys(d.lines).length === 0;
   const ul = $("lines");
-  ul.innerHTML = "";
-  for (const [key, ln] of Object.entries(d.lines)) {
+  ul.replaceChildren();
+  for (const ln of Object.values(d.lines)) {
     const li = document.createElement("li");
-    const label = ln.serial ? `${ln.code} · serial ${ln.serial}` : ln.code;
-    const tag = ln.serial
-      ? `<span class="tag ok">serialized ×1</span>`
-      : `<span class="tag warn">count ${ln.count}</span>`;
-    li.innerHTML = `<span>${label}</span>${tag}`;
+    const label = document.createElement("span");
+    label.textContent = ln.serial ? `${ln.code} · serial ${ln.serial}` : ln.code;
+    li.appendChild(label);
+    li.appendChild(ln.serial ? tag("ok", "serialized ×1") : tag("warn", `count ${ln.count}`));
     ul.appendChild(li);
   }
   for (const e of d.exceptions) {
     const li = document.createElement("li");
-    li.innerHTML = `<span>${e.line || "kit"} — ${e.kind}: ${e.reason}</span>` +
-      `<span class="tag bad">exception</span>`;
+    const label = document.createElement("span");
+    label.textContent = `${e.line || "kit"} — ${e.kind}: ${e.reason}`;
+    li.appendChild(label);
+    li.appendChild(tag("bad", "exception"));
     ul.appendChild(li);
   }
 }
 
+// ---------- incoming kits / legs ---------------------------------------------
+async function loadKits() {
+  const sel = $("kit-sel");
+  if (!state.token) {
+    sel.disabled = true;
+    sel.replaceChildren(new Option("— sign in to load incoming kits —", ""));
+    return;
+  }
+  try {
+    const res = await api("/api/kits");
+    markCache(res.ok);
+    if (!res.ok) return;
+    const { kits } = await res.json();
+    state.kits = kits || [];
+    sel.replaceChildren(new Option("— choose the kit you are receiving —", ""));
+    for (const k of state.kits) {
+      sel.appendChild(new Option(`${k.kit_id} (rev ${k.manifest_rev})`, k.kit_id));
+    }
+    sel.disabled = false;
+    if (state.draft?.kit) sel.value = state.draft.kit;
+    updateLegInfo();
+  } catch {
+    markCache(false);
+  }
+}
+
+async function updateLegInfo() {
+  const d = state.draft;
+  const kitId = $("kit-sel").value;
+  if (!kitId) {
+    $("leg-info").textContent = "Select the kit whose delivery you are receiving.";
+    return;
+  }
+  try {
+    const res = await api(`/api/kits/${encodeURIComponent(kitId)}`);
+    markCache(res.ok);
+    if (!res.ok) { $("leg-info").textContent = "Could not load kit detail."; return; }
+    const { kit, legs } = await res.json();
+    // proj_legs SQL columns: leg_id, sender, dest, status, qty (dispatched
+    // units as JSONB). The leg we can receive is the OPEN leg addressed to us.
+    const open = (legs || []).filter((l) => l.status === "open" && l.dest === state.org);
+    if (d && d.kit !== kitId) {
+      d.kit = kitId;
+      d.manifestRev = kit.manifest_rev;
+      d.caseId = null; // a different kit means a different case
+      d.opId = d.opId || newOpId();
+    }
+    if (open.length === 0) {
+      if (d) { d.leg = ""; d.origin = ""; }
+      $("leg-info").textContent =
+        "No open leg addressed to your institution on this kit — nothing to receive.";
+    } else {
+      const leg = open[0];
+      if (d) { d.leg = leg.leg_id; d.origin = leg.sender; }
+      const qty = Object.entries(leg.qty || {})
+        .map(([k, v]) => `${k}×${v}`).join(", ");
+      $("leg-info").textContent =
+        `Active leg ${leg.leg_id}: ${leg.sender} → ${state.org}, dispatched ${qty || "?"}` +
+        (open.length > 1 ? ` (${open.length} open legs — receiving oldest)` : "");
+    }
+    if (d) await saveDraft();
+  } catch {
+    markCache(false);
+    $("leg-info").textContent = "Offline — kit detail unavailable.";
+  }
+}
+
 // ---------- scanner -----------------------------------------------------------
-// Barcode "code[serial]" — a serial suffix marks a serialized unit which is
-// always counted once; identical re-scans are merged with an explanation.
 function parseScan(text) {
   const t = text.trim();
   const m = t.match(/^([^\[\]]+)(?:\[(.+)\])?$/);
@@ -151,11 +255,10 @@ async function addScan(text) {
   } else {
     say(`${p.code} added`);
   }
-  $("scan").value = "";
   $("scan").focus();
 }
 
-// ---------- sign-off -----------------------------------------------------------
+// ---------- payload + case -----------------------------------------------------
 function buildPayload() {
   const d = state.draft;
   const accepted = [], missing = [], conds = [];
@@ -168,11 +271,11 @@ function buildPayload() {
   }
   return {
     kind: "receive",
-    kitId: d.kit || "kit",
-    opId: `desk-${Date.now()}`,
+    kitId: d.kit,
+    opId: d.opId,
     args: {
-      opID: `desk-${Date.now()}`,
-      legID: d.leg || "leg",
+      opID: d.opId,
+      legID: d.leg,
       accepted: accepted.join(";"),
       conds: conds.join(";"),
       missing: missing.join(";"),
@@ -181,34 +284,55 @@ function buildPayload() {
   };
 }
 
+// One reviewed op + payload per draft, persisted across reload/retry.
+async function ensureCase() {
+  const d = state.draft;
+  if (d.caseId) return d.caseId;
+  const payload = buildPayload();
+  const res = await api("/api/cases", {
+    method: "POST",
+    body: { kind: payload.kind, kitId: payload.kitId, opId: payload.opId, args: payload.args },
+  });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(b.error || `case create failed (${res.status})`);
+  d.caseId = b.caseId;
+  await saveDraft();
+  return d.caseId;
+}
+
+// ---------- sign-off -----------------------------------------------------------
+let reReviewNeeded = false;
+
 async function openSignOff() {
   const d = state.draft;
-  if (!d) return;
-  // Reconnect check: refetch kit state and diff the draft before preview.
-  let diff = "";
+  if (!d || !d.leg) return;
+  reReviewNeeded = false;
   try {
-    const res = await api(`/api/kits/${encodeURIComponent(d.kit || "kit")}`);
+    const res = await api(`/api/kits/${encodeURIComponent(d.kit)}`);
     markCache(res.ok);
     if (res.ok) {
-      const kit = await res.json();
-      const manifestRev = kit.kit?.manifest_rev;
-      const revChanged = d.manifestRev !== undefined && d.manifestRev !== manifestRev;
-      d.manifestRev = manifestRev;
-      if (revChanged) {
-        diff = `Manifest changed since drafting (now rev ${manifestRev}) — please re-review.`;
+      const j = await res.json();
+      const manifestRev = j.kit?.manifest_rev;
+      if (d.manifestRev !== undefined && d.manifestRev !== manifestRev) {
+        reReviewNeeded = true;
+        d.manifestRev = manifestRev;
+        d.caseId = null; // the reviewed payload predates the change
+        await saveDraft();
       }
+      d.manifestRev = manifestRev;
     }
   } catch {
     markCache(false);
-    diff = "Offline — the preview below is from your local draft only.";
   }
 
   const pv = $("preview");
   const lines = Object.values(d.lines);
-  pv.innerHTML = "";
+  pv.replaceChildren();
   const rows = [
     ["Origin", d.origin || "(partner institution)"],
     ["Destination", state.org || "(your institution)"],
+    ["Kit / leg", `${d.kit} · ${d.leg}`],
+    ["Operation id", d.opId],
     ["Manifest version", d.manifestRev !== undefined ? `rev ${d.manifestRev}` : "unverified — offline"],
     ["Accepted lines", lines.map((l) => `${l.code}×${l.serial ? 1 : l.count}`).join("; ") || "none"],
     ["Missing lines", d.exceptions.filter((e) => e.kind === "missing").map((e) => e.line).join("; ") || "none"],
@@ -226,91 +350,184 @@ async function openSignOff() {
     "at your institution in the stated condition, and records the exceptions " +
     "shown as part of the kit's permanent custody record.";
   $("sign-steps").hidden = true;
-  $("sign-status").textContent = "";
-  if (diff) say(diff);
+  $("do-sign").disabled = reReviewNeeded;
+  $("sign-status").textContent = reReviewNeeded
+    ? "Manifest changed since drafting — go back and re-review the draft before signing."
+    : "";
+  if (reReviewNeeded) say("Manifest changed — re-review required");
   show("sign");
 }
 
-// Wallet/signature refusal leaves the stable route: stay on the sign view,
-// keep the draft, let the desk retry or go back.
-async function submitSignature() {
-  const pubkey = $("sig-pubkey").value.trim();
-  const sig = $("sig-value").value.trim();
-  if (!pubkey || !sig) {
-    $("sign-status").textContent = "Paste both pub_key and signature values.";
-    return;
-  }
-  const payload = buildPayload();
+// Wallet/signature refusal leaves the stable route: the draft and case
+// survive, nothing is broadcast, staff can retry or go back.
+async function beginSigning() {
+  const d = state.draft;
+  if (!d || reReviewNeeded) return;
+  $("sign-status").textContent = "";
   try {
-    const c = await api("/api/cases", {
-      method: "POST",
-      body: { kind: payload.kind, kitId: payload.kitId, opId: payload.opId, args: payload.args },
-    });
-    if (!c.ok) {
-      const err = await c.json().catch(() => ({}));
-      $("sign-status").textContent = `Case rejected: ${err.error || c.status}`;
-      return;
-    }
-    const kase = await c.json();
-    await api(`/api/cases/${kase.caseId}/transition`, {
+    const caseId = await ensureCase();
+    // Signature-request is the deliberate state change before any signing.
+    const tr = await api(`/api/cases/${encodeURIComponent(caseId)}/transition`, {
       method: "POST", body: { state: "signature-request" },
     });
-    await api(`/api/cases/${kase.caseId}/transition`, {
-      method: "POST", body: { state: "broadcast" },
-    });
-    // Confirmation is the realm receipt — never the transport response.
-    const conf = await api(`/api/cases/${kase.caseId}/confirm`, { method: "POST" });
-    const confBody = await conf.json();
-    if (confBody.state === "confirmed") {
-      state.draft.signed = true;
-      await Drafts.save(state.draft);
-      $("sign-status").textContent =
-        `Receipt confirmed on chain (case ${kase.caseId}). Draft is now immutable.`;
-      say("Receipt confirmed on chain");
-      setTimeout(() => { state.draft = blankDraft(); renderDraft(); show("receive"); }, 1200);
-    } else {
-      $("sign-status").textContent =
-        `Broadcast state: ${confBody.state || conf.status} — case ${kase.caseId} ` +
-        `is recoverable via the case view once the chain confirms.`;
+    if (!tr.ok && tr.status !== 409) {
+      const e = await tr.json().catch(() => ({}));
+      $("sign-status").textContent = e.error || `transition refused (${tr.status})`;
+      return;
     }
+    const sg = await api(`/api/cases/${encodeURIComponent(caseId)}/signable`);
+    const sb = await sg.json();
+    if (!sg.ok) {
+      $("sign-status").textContent = sb.error || `signable failed (${sg.status})`;
+      return;
+    }
+    $("unsigned-tx").value = JSON.stringify(sb.tx, null, 2);
+    state.signdoc = sb.signdoc;
+    state.chainId = sb.chainId;
+    $("sign-steps").hidden = false;
+    $("sign-status").textContent =
+      `Case ${caseId} — unsigned tx ready for chain ${sb.chainId}. ` +
+      "Sign with the institution key; nothing is broadcast by this desk.";
+    say("Unsigned transaction ready");
+    $("txhash-in").focus();
   } catch (e) {
-    $("sign-status").textContent = `Could not reach the API — draft preserved. (${e.message})`;
+    $("sign-status").textContent = `Could not prepare the transaction — draft preserved. (${e.message})`;
+  }
+}
+
+async function markBroadcast() {
+  const d = state.draft;
+  const txhash = $("txhash-in").value.trim();
+  if (!d?.caseId || !txhash) {
+    $("sign-status").textContent = "Paste the transaction hash from the external broadcast.";
+    return;
+  }
+  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/broadcast`, {
+    method: "POST", body: { txhash },
+  });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $("sign-status").textContent = b.error || `broadcast record refused (${res.status})`;
+    return;
+  }
+  $("sign-status").textContent =
+    `Broadcast recorded (${b.txhash.slice(0, 12)}…). Now check the chain receipt.`;
+  say("Broadcast recorded — awaiting chain receipt");
+  await checkReceipt();
+}
+
+async function relaySigned() {
+  const d = state.draft;
+  let doc;
+  try { doc = JSON.parse($("signed-doc").value); }
+  catch { $("sign-status").textContent = "The signed document is not valid JSON."; return; }
+  if (!d?.caseId) return;
+  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/broadcast`, {
+    method: "POST", body: { signedDoc: doc },
+  });
+  const b = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $("sign-status").textContent = b.error || `relay failed (${res.status})`;
+    return;
+  }
+  $("sign-status").textContent =
+    `Relayed (${String(b.txhash).slice(0, 12)}…). Now check the chain receipt.`;
+  say("Broadcast relayed — awaiting chain receipt");
+  await checkReceipt();
+}
+
+async function checkReceipt() {
+  const d = state.draft;
+  if (!d?.caseId) return;
+  const res = await api(`/api/cases/${encodeURIComponent(d.caseId)}/confirm`, { method: "POST" });
+  const b = await res.json().catch(() => ({}));
+  if (b.state === "confirmed") {
+    d.signed = true;
+    await Drafts.save(d);
+    $("sign-status").textContent =
+      `Receipt confirmed on chain (case ${d.caseId}). Draft is now immutable.`;
+    say("Receipt confirmed on chain");
+    setTimeout(() => { state.draft = blankDraft(); renderDraft(); show("receive"); }, 1400);
+  } else if (b.state === "unknown") {
+    $("sign-status").textContent =
+      "No chain receipt yet — the case stays recoverable in the Case view. " +
+      "Broadcast the signed tx, then check again.";
+  } else {
+    $("sign-status").textContent = b.error || `confirmation state: ${b.state || res.status}`;
   }
 }
 
 // ---------- case view -----------------------------------------------------------
+async function loadCaseList() {
+  const ul = $("case-list");
+  ul.replaceChildren();
+  if (!state.token) return;
+  try {
+    const res = await api("/api/cases");
+    if (!res.ok) return;
+    const { cases } = await res.json();
+    for (const c of cases || []) {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = `${c.case_id} · ${c.kind} · kit ${c.kit_id} · op ${c.op_id}`;
+      li.appendChild(label);
+      li.appendChild(tag(c.state === "confirmed" ? "ok" : c.state === "failed" ? "bad" : "warn", c.state));
+      if (c.state !== "confirmed" && c.state !== "failed") {
+        const btn = document.createElement("button");
+        btn.className = "btn ghost";
+        btn.type = "button";
+        btn.textContent = "Check receipt";
+        btn.onclick = async () => {
+          const r = await api(`/api/cases/${encodeURIComponent(c.case_id)}/confirm`, { method: "POST" });
+          const b = await r.json().catch(() => ({}));
+          say(b.state === "confirmed" ? `${c.case_id} confirmed` : `${c.case_id}: ${b.state || r.status}`);
+          loadCaseList();
+        };
+        li.appendChild(btn);
+      }
+      ul.appendChild(li);
+    }
+    if (!ul.children.length) {
+      const li = document.createElement("li");
+      li.textContent = "No cases for this institution yet.";
+      ul.appendChild(li);
+    }
+  } catch { markCache(false); }
+}
+
 async function loadCase() {
   const kit = $("case-kit").value.trim();
+  const legId = $("case-leg").value;
   if (!kit) return;
   const body = $("case-body");
-  body.innerHTML = "";
+  body.replaceChildren();
   try {
-    const [legRes, excRes, kitRes] = await Promise.all([
-      api(`/api/reader/leg?id=${encodeURIComponent("leg-1")}`),
+    const calls = [
       api(`/api/reader/exceptions?id=${encodeURIComponent(kit)}`),
       api(`/api/reader/kit?id=${encodeURIComponent(kit)}`),
-    ]);
-    markCache(legRes.ok && excRes.ok && kitRes.ok);
-    const leg = await legRes.json();
+    ];
+    if (legId) calls.push(api(`/api/reader/leg?id=${encodeURIComponent(legId)}`));
+    const [excRes, kitRes, legRes] = await Promise.all(calls);
+    markCache(excRes.ok && kitRes.ok && (!legRes || legRes.ok));
     const excs = (await excRes.json()).exceptions || [];
     const kitJ = await kitRes.json();
+    const leg = legRes ? await legRes.json() : null;
 
-    // Both institutional statements chronologically, with heights.
     const statements = [];
-    if (leg.openHeight) {
+    if (leg && leg.openHeight) {
       statements.push({
         org: leg.sender, h: leg.openHeight,
-        text: `dispatched ${Object.entries(leg.dispatched || {}).map(([k, v]) => `${k}×${v}`).join(", ")}`,
+        text: `dispatched ${Object.entries(leg.qty || {}).map(([k, v]) => `${k}×${v}`).join(", ")}`,
       });
-    }
-    if (leg.observed) {
-      statements.push({
-        org: leg.dest, h: leg.openHeight,
-        text: `received ${Object.entries(leg.accepted || {}).map(([k, v]) => `${k}×${v}`).join(", ") || "nothing"}`,
-      });
-    }
-    if (leg.closeHeight) {
-      statements.push({ org: leg.sender, h: leg.closeHeight, text: "leg closed" });
+      if (leg.observed) {
+        statements.push({
+          org: leg.dest, h: leg.openHeight,
+          text: `received ${Object.entries(leg.accepted || {}).map(([k, v]) => `${k}×${v}`).join(", ") || "nothing"}`,
+        });
+      }
+      if (leg.closeHeight) {
+        statements.push({ org: leg.sender, h: leg.closeHeight, text: "leg closed" });
+      }
     }
     for (const e of excs) {
       statements.push({
@@ -322,34 +539,65 @@ async function loadCase() {
     for (const s of statements) {
       const div = document.createElement("div");
       div.className = "case-statement";
-      div.innerHTML = `<h4>${s.org}</h4><p>${s.text}</p>` +
-        `<p class="case-meta">block height ${s.h}</p>`;
+      const h = document.createElement("h4"); h.textContent = s.org;
+      const p = document.createElement("p"); p.textContent = s.text;
+      const meta = document.createElement("p");
+      meta.className = "case-meta";
+      meta.textContent = `block height ${s.h}`;
+      div.append(h, p, meta);
       body.appendChild(div);
     }
     const disputed = excs.filter((e) => e.status === "open");
     if (disputed.length) {
       const p = document.createElement("p");
-      p.innerHTML = `<span class="tag bad">disputed</span> ` +
-        disputed.map((e) => `${e.line}: ${e.kind}`).join(", ");
+      p.appendChild(tag("bad", "disputed"));
+      p.appendChild(document.createTextNode(
+        " " + disputed.map((e) => `${e.line}: ${e.kind}`).join(", ")));
       body.appendChild(p);
     }
-    const next = kitJ.hold ? "owner assessment required" :
-      kitJ.available ? "kit available — no action" : "awaiting receiving desk";
     const np = document.createElement("p");
     np.className = "case-meta";
-    np.textContent = `Next authorized role: ${next}`;
+    np.textContent = `Next authorized role: ${
+      kitJ.hold ? "owner assessment required" :
+      kitJ.available ? "kit available — no action" : "awaiting receiving desk"}`;
     body.appendChild(np);
-    // Owner-side assessment control appears only to the owner org's staff.
     if (state.org && kitJ.owner === state.org && kitJ.needsAssessment) {
       const b = document.createElement("button");
       b.className = "btn primary";
       b.textContent = "Open assessment";
-      b.onclick = () => { state.draft = blankDraft(); state.draft.kit = kit; show("receive"); };
+      b.onclick = () => {
+        state.draft = blankDraft();
+        state.draft.kit = kit;
+        saveDraft();
+        show("receive");
+      };
       body.appendChild(b);
     }
   } catch (e) {
     markCache(false);
-    body.innerHTML = `<p class="hint">Could not load case: ${e.message}</p>`;
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = `Could not load case: ${e.message}`;
+    body.appendChild(p);
+  }
+}
+
+// Populate the leg selector whenever the case kit changes.
+async function loadCaseLegs() {
+  const kit = $("case-kit").value.trim();
+  const sel = $("case-leg");
+  sel.replaceChildren();
+  if (!kit || !state.token) { sel.appendChild(new Option("", "")); return; }
+  try {
+    const res = await api(`/api/kits/${encodeURIComponent(kit)}`);
+    if (!res.ok) { sel.appendChild(new Option("", "")); return; }
+    const { legs } = await res.json();
+    for (const l of legs || []) {
+      sel.appendChild(new Option(`${l.leg_id} · ${l.sender} → ${l.dest} · ${l.status}`, l.leg_id));
+    }
+    if (!legs?.length) sel.appendChild(new Option("(no legs)", ""));
+  } catch {
+    sel.appendChild(new Option("", ""));
   }
 }
 
@@ -360,7 +608,7 @@ async function requestChallenge(ev) {
   const addr = $("login-addr").value.trim();
   const deviceId = $("login-device").value.trim();
   const res = await api("/api/session/challenge", {
-    method: "POST", body: JSON.stringify({ addr, org, deviceId }),
+    method: "POST", body: { addr, org, deviceId },
   });
   const b = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -372,6 +620,7 @@ async function requestChallenge(ev) {
     return;
   }
   state.challengeId = b.challengeId;
+  state.device = deviceId;
   $("ch-tx").value = JSON.stringify(b.tx, null, 2);
   $("challenge-steps").hidden = false;
   $("login-status").textContent = "Challenge issued — sign it with the institution key.";
@@ -396,36 +645,46 @@ async function completeLogin() {
   localStorage.setItem("kt.token", b.token);
   localStorage.setItem("kt.org", b.org);
   localStorage.setItem("kt.addr", b.addr);
+  if (state.device) localStorage.setItem("kt.device", state.device);
   renderWho();
   $("logout").hidden = false;
   $("login-status").textContent = `Signed in as ${b.org}.`;
   say("Signed in");
+  await loadKits();
+  // Reload the scope's unsigned draft after sign-in.
+  const drafts = await Drafts.all();
+  state.draft = drafts.find((d) => !d.signed && d.scope === scopeKey()) || blankDraft();
+  renderDraft();
+  if (state.draft.kit) $("kit-sel").value = state.draft.kit;
   show("receive");
 }
 
 async function logout() {
   await api("/api/session", { method: "DELETE" });
-  state.token = null;
-  localStorage.removeItem("kt.token");
-  $("logout").hidden = true;
-  renderWho();
+  clearSession();
+  await loadKits();
   say("Signed out");
 }
 
 // ---------- wiring -----------------------------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
-  state.draft = (await Drafts.all()).find((d) => !d.signed) || blankDraft();
+  const drafts = await Drafts.all();
+  state.draft = drafts.find((d) => !d.signed && d.scope === scopeKey()) || blankDraft();
   renderDraft();
   renderWho();
+  await loadKits();
 
   document.querySelectorAll("[data-nav]").forEach((b) => {
     b.addEventListener("click", () => show(b.dataset.nav));
   });
 
+  // The input is cleared synchronously — before addScan's async IndexedDB
+  // write — so a fast next scan can't be overwritten by a mid-flight save.
   $("scan-form").addEventListener("submit", (e) => {
     e.preventDefault(); // Enter adds a scan — it never signs.
-    const v = $("scan").value.trim();
-    if (v) addScan(v);
+    const v = $("scan").value;
+    $("scan").value = "";
+    if (v.trim()) addScan(v);
   });
   $("lookup").addEventListener("click", () => {
     const v = prompt("Component id or barcode:");
@@ -460,27 +719,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     say(`${e.kind} exception recorded for ${e.line || "kit"}`);
     $("exc-line").value = "";
     $("exc-reason").value = "";
-    $("scan").focus(); // focus returns to the scan lane afterwards
+    $("scan").focus();
   });
+  $("kit-sel").addEventListener("change", updateLegInfo);
   $("signoff").addEventListener("click", openSignOff);
   $("back-draft").addEventListener("click", () => { show("receive"); });
-  $("do-sign").addEventListener("click", () => {
-    // Build the unsigned case locally — the desk never holds keys.
-    $("sign-steps").hidden = false;
-    const payload = buildPayload();
-    $("unsigned-tx").value = JSON.stringify(
-      { note: "create POST /api/cases with this payload after signing externally",
-        payload }, null, 2);
-    $("sig-pubkey").focus();
+  $("do-sign").addEventListener("click", beginSigning);
+  $("mark-broadcast").addEventListener("click", markBroadcast);
+  $("relay-btn").addEventListener("click", relaySigned);
+  $("check-receipt").addEventListener("click", checkReceipt);
+  $("back-sign").addEventListener("click", () => { show("receive"); });
+  $("download-tx").addEventListener("click", () => {
+    const blob = new Blob([$("unsigned-tx").value], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${state.draft?.caseId || "tx"}-unsigned.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
   });
-  $("confirm-sign").addEventListener("click", submitSignature);
+  $("copy-tx").addEventListener("click", async () => {
+    await navigator.clipboard.writeText($("unsigned-tx").value).catch(() => {});
+    say("Unsigned transaction copied");
+  });
   $("case-load").addEventListener("click", loadCase);
+  $("case-kit").addEventListener("change", loadCaseLegs);
   $("challenge-form").addEventListener("submit", requestChallenge);
   $("ch-submit").addEventListener("click", completeLogin);
   $("logout").addEventListener("click", logout);
   $("logout").hidden = !state.token;
 
-  // Refocus the scan lane after any interaction ends outside a form field.
   document.addEventListener("focusin", (e) => {
     if (state.view === "receive" &&
         !/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)) {

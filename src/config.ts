@@ -13,6 +13,7 @@ export interface Config {
   pollMs: number;
   pageLimit: number;      // GetEvents page size (KIT_PAGE_LIMIT for QA runs)
   network: string;        // chain-id bound into staff sign-in challenges
+  gnokeyBin: string;      // optional: gnokey path enabling the signed-tx relay
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -28,5 +29,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     pollMs: Number(env.KIT_POLL_MS ?? 1000),
     pageLimit: Number(env.KIT_PAGE_LIMIT ?? 200),
     network: env.KIT_NETWORK ?? "dev",
+    gnokeyBin: env.KIT_GNOKEY_BIN ?? "",
   };
 }

@@ -103,3 +103,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* incoming kit / active leg picker */
+.legpicker { margin: .4rem 0 1rem; }
+.legpicker select { min-height: 44px; min-width: 16rem; }

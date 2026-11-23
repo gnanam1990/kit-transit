@@ -18,6 +18,11 @@ import { storeEvidence, fetchEvidence, EvidenceError } from "./evidence.ts";
 import { parseCsv, importCsv, exportCsv, partnerCsv, drainOutbox } from "./catalogue.ts";
 import { exportCase, lookupOperation, compareProjectionToRealm } from "./audit.ts";
 import { caseDigest } from "./digest.ts";
+import { caseTx, caseSigndoc } from "./txbuild.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 const REALM_FN: Record<string, string> = {
   dispatch: "Dispatch",
@@ -88,6 +93,31 @@ function buildPayload(kind: string, args: Record<string, unknown>): Record<strin
     if (args[k] !== undefined) out[k] = args[k];
   }
   return out;
+}
+
+const execFileP = promisify(execFile);
+
+// Transmit a staff-signed tx document through the configured gnokey binary.
+// The relay only broadcasts what staff signed — it never produces signatures.
+// Runs with an isolated empty -home so no real keybase is touched.
+async function relaySigned(cfg: Config, signedDoc: object): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "kt-relay-"));
+  try {
+    const file = join(dir, "signed.json");
+    await writeFile(file, JSON.stringify(signedDoc));
+    const remote = cfg.rpcUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    const { stdout, stderr } = await execFileP(cfg.gnokeyBin,
+      ["broadcast", "-remote", remote, "-home", join(dir, "home"), file],
+      { timeout: 30_000 });
+    const out = `${stdout}\n${stderr}`;
+    const h = out.match(/TX HASH:\s*(\S+)/);
+    if (!h) {
+      throw new Error(`gnokey broadcast returned no tx hash: ${out.trim()}`);
+    }
+    return h[1]!;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 const STATIC_MIME: Record<string, string> = {
@@ -201,6 +231,16 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       }
 
       // ---------- cases: distinct draft->signature->broadcast->confirm ----
+      if (path === "/api/cases" && method === "GET") {
+        const s = await sessionOf(req, pool);
+        if (!s) { json(res, 401, { error: "session required" }); return; }
+        const rows = await pool.query(
+          `SELECT case_id, kind, kit_id, op_id, state, txhash, updated_at
+           FROM cases WHERE org_id=$1 ORDER BY updated_at DESC LIMIT 100`,
+          [s.org_id]);
+        json(res, 200, { cases: rows.rows });
+        return;
+      }
       if (path === "/api/cases" && method === "POST") {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
@@ -308,6 +348,71 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
         const kase = c.rows[0] as any;
         if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
         json(res, 200, kase);
+        return;
+      }
+      // GET /api/cases/:id/signable — the reviewed payload rendered as a real
+      // unsigned Gno tx plus the canonical gnokey signdoc. Staff signs it
+      // offline with their own key; this API never signs or holds keys.
+      if ((m = path.match(/^\/api\/cases\/([^/]+)\/signable$/)) && method === "GET") {
+        const s = await sessionOf(req, pool);
+        if (!s) { json(res, 401, { error: "session required" }); return; }
+        const c = await pool.query(`SELECT * FROM cases WHERE case_id=$1`, [m[1]]);
+        const kase = c.rows[0] as any;
+        if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
+        const payload = typeof kase.payload === "string"
+          ? JSON.parse(kase.payload) : kase.payload;
+        let chainId = cfg.network;
+        try { chainId = (await chain.status()).network || chainId; } catch { /* offline cfg */ }
+        json(res, 200, {
+          caseId: m[1], chainId,
+          tx: caseTx({ realm: chain.realmPath(), caller: kase.signer, payload }),
+          signdoc: caseSigndoc({
+            chainId, realm: chain.realmPath(), caller: kase.signer, payload,
+          }),
+        });
+        return;
+      }
+      // POST /api/cases/:id/broadcast — one of two real paths:
+      //   {txhash}    staff broadcast the signed tx with an external wallet /
+      //               gnokey; the hash is recorded and /confirm verifies the
+      //               chain receipt before the case may confirm.
+      //   {signedDoc} relay the staff-signed tx through the configured local
+      //               gnokey (KIT_GNOKEY_BIN). The relay only transmits what
+      //               staff signed; it never signs or holds keys.
+      if ((m = path.match(/^\/api\/cases\/([^/]+)\/broadcast$/)) && method === "POST") {
+        const s = await sessionOf(req, pool);
+        if (!s) { json(res, 401, { error: "session required" }); return; }
+        const b = JSON.parse((await readBody(req)).toString() || "{}");
+        const c = await pool.query(`SELECT * FROM cases WHERE case_id=$1`, [m[1]]);
+        const kase = c.rows[0] as any;
+        if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
+        if (!["signature-request", "broadcast", "unknown"].includes(kase.state)) {
+          json(res, 409, {
+            error: `case is ${kase.state}; move it to signature-request first`,
+          });
+          return;
+        }
+        let txhash = typeof b.txhash === "string" && b.txhash ? b.txhash : "";
+        if (!txhash && b.signedDoc && typeof b.signedDoc === "object") {
+          if (!cfg.gnokeyBin) {
+            json(res, 400, {
+              error: "no relay configured (KIT_GNOKEY_BIN); broadcast with " +
+                "gnokey and POST {txhash}",
+            });
+            return;
+          }
+          try {
+            txhash = await relaySigned(cfg, b.signedDoc);
+          } catch (e) {
+            json(res, 502, { error: `relay failed: ${(e as Error).message}` });
+            return;
+          }
+        }
+        if (!txhash) { json(res, 400, { error: "txhash or signedDoc required" }); return; }
+        await pool.query(
+          `UPDATE cases SET state='broadcast', txhash=$2, updated_at=now()
+           WHERE case_id=$1`, [m[1], txhash]);
+        json(res, 200, { caseId: m[1], state: "broadcast", txhash });
         return;
       }
 
