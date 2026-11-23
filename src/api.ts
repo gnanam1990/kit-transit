@@ -10,7 +10,10 @@ import { join, extname, resolve, sep } from "node:path";
 import type { Config } from "./config.ts";
 import type { Pool } from "./db.ts";
 import type { ChainClient } from "./chain.ts";
-import { createSession, getSession, revokeSession, type Session } from "./sessions.ts";
+import {
+  createChallenge, redeemChallenge, getSession, revokeSession, AuthError,
+  type Session,
+} from "./sessions.ts";
 import { storeEvidence, fetchEvidence, EvidenceError } from "./evidence.ts";
 import { parseCsv, importCsv, exportCsv, drainOutbox } from "./catalogue.ts";
 import { exportCase, lookupOperation, compareProjectionToRealm } from "./audit.ts";
@@ -129,16 +132,40 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       }
 
       // ---------- sessions ------------------------------------------------
-      if (path === "/api/session" && method === "POST") {
-        const b = JSON.parse(readBody(req).toString() || "{}");
+      // POST /api/session/challenge {addr, org, deviceId} issues a one-use,
+      // short-lived challenge bound to network/realm/org/device. Refused
+      // outright when the address has no active grant — a bare public
+      // address gets nothing to sign.
+      if (path === "/api/session/challenge" && method === "POST") {
+        const b = JSON.parse((await readBody(req)).toString() || "{}");
         if (typeof b.addr !== "string" || typeof b.org !== "string" ||
             typeof b.deviceId !== "string") {
           json(res, 400, { error: "addr, org, deviceId required" });
           return;
         }
-        const s = await createSession(pool, b.addr, b.org, b.deviceId, cfg.sessionTtlSec);
-        if (!s) { json(res, 403, { error: "address not bound to org" }); return; }
-        json(res, 201, { token: s.token, org: s.org_id, addr: s.addr });
+        const ch = await createChallenge(pool, {
+          addr: b.addr, org: b.org, deviceId: b.deviceId,
+          network: cfg.network, realm: cfg.realm,
+        });
+        if (!ch) { json(res, 403, { error: "no active grant for addr in org" }); return; }
+        json(res, 200, ch);
+        return;
+      }
+      // POST /api/session {challengeId, pubkey, signature} redeems a signed
+      // challenge. A session is issued only after the ed25519 signature
+      // verifies, sha256(pubkey)[:20] derives the claimed address, and the
+      // grant is still active.
+      if (path === "/api/session" && method === "POST") {
+        const b = JSON.parse((await readBody(req)).toString() || "{}");
+        try {
+          const s = await redeemChallenge(pool, String(b.challengeId ?? ""),
+            String(b.pubkey ?? ""), String(b.signature ?? ""), cfg.sessionTtlSec);
+          json(res, 201, { token: s.token, org: s.org_id, addr: s.addr });
+        } catch (e) {
+          if (e instanceof AuthError) {
+            json(res, 403, { error: e.message });
+          } else { throw e; }
+        }
         return;
       }
       if (path === "/api/session" && method === "DELETE") {
@@ -176,7 +203,7 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       if (path === "/api/cases" && method === "POST") {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
-        const b = JSON.parse(readBody(req).toString() || "{}");
+        const b = JSON.parse((await readBody(req)).toString() || "{}");
         if (typeof b.kind !== "string" || typeof b.kitId !== "string" ||
             typeof b.opId !== "string" || typeof b.args !== "object" || !b.args) {
           json(res, 400, { error: "kind, kitId, opId, args required" }); return;
@@ -201,7 +228,7 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       if ((m = path.match(/^\/api\/cases\/([^/]+)\/transition$/)) && method === "POST") {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
-        const b = JSON.parse(readBody(req).toString() || "{}");
+        const b = JSON.parse((await readBody(req)).toString() || "{}");
         const c = await pool.query(`SELECT * FROM cases WHERE case_id=$1`, [m[1]]);
         const kase = c.rows[0] as any;
         if (!kase || kase.org_id !== s.org_id) { json(res, 404, { error: "unknown case" }); return; }
@@ -284,7 +311,7 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
       if (path === "/api/catalogue/import" && method === "POST") {
         const s = await sessionOf(req, pool);
         if (!s) { json(res, 401, { error: "session required" }); return; }
-        const rows = parseCsv(readBody(req).toString());
+        const rows = parseCsv((await readBody(req)).toString());
         json(res, 200, await importCsv(pool, rows));
         return;
       }

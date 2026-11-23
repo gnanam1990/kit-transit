@@ -60,12 +60,13 @@ export class FakeChain implements Pick<ChainClient, "status" | "events" | "query
   legs: Record<string, any> = {};
   excs: Record<string, any[]> = {};
   claims: Record<string, any[]> = {};
+  orgs: Record<string, any> = {};
 
   async status(): Promise<ChainStatus> {
     return { network: this.network, height: this.height, epoch: this.epoch };
   }
-  async events(afterSeq = 0): Promise<EventPage> {
-    const events = this.feed.events.filter((e) => e.seq > afterSeq);
+  async events(afterSeq = 0, limit = 200): Promise<EventPage> {
+    const events = this.feed.events.filter((e) => e.seq > afterSeq).slice(0, limit);
     return { ...this.feed, events, lastSeq: this.feed.lastSeq };
   }
   async query(fn: string): Promise<Record<string, unknown>> {
@@ -84,6 +85,10 @@ export class FakeChain implements Pick<ChainClient, "status" | "events" | "query
     if (fn.startsWith("GetClaims(")) {
       const id = fn.slice(11, -2);
       return { claims: this.claims[id] ?? [] };
+    }
+    if (fn.startsWith("GetOrg(")) {
+      const id = fn.slice(8, -2);
+      return this.orgs[id] ?? { error: "unknown org" };
     }
     return { raw: "{}" };
   }

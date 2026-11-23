@@ -89,6 +89,76 @@ test("network change suspends writes", async () => {
   await assert.rejects(indexOnce(pool, chain as any), IndexerSuspended);
 });
 
+// Page-limited pages: the checkpoint advances only to the last contiguous
+// applied event, never to GetEvents' global head (KIT_QA_PAGE_LIMIT=2 case).
+test("page limit advances checkpoint to last applied seq, not feed head", async () => {
+  const chain = new FakeChain();
+  chain.kits["kit-1"] = kitJson({ kit: "kit-1" });
+  chain.feed.events = [
+    ev(1, "manifest-define", "kit-1"),
+    ev(2, "dispatch", "kit-1"),
+    ev(3, "receive", "kit-1"),
+    ev(4, "close", "kit-1"),
+    ev(5, "release", "kit-1"),
+  ];
+  chain.feed.lastSeq = 5; // global head — must NOT be checkpointed early
+
+  await indexOnce(pool, chain as any, 2);
+  let cp = (await pool.query(`SELECT last_seq FROM checkpoint WHERE id=1`)).rows[0];
+  assert.equal(Number(cp.last_seq), 2, "checkpoint must not skip past page");
+
+  await indexOnce(pool, chain as any, 2);
+  cp = (await pool.query(`SELECT last_seq FROM checkpoint WHERE id=1`)).rows[0];
+  assert.equal(Number(cp.last_seq), 4);
+
+  await indexOnce(pool, chain as any, 2);
+  cp = (await pool.query(`SELECT last_seq FROM checkpoint WHERE id=1`)).rows[0];
+  assert.equal(Number(cp.last_seq), 5);
+  const evs = await pool.query(`SELECT count(*) c FROM realm_events`);
+  assert.equal(Number(evs.rows[0].c), 5, "all events eventually applied");
+});
+
+// Gaps in the feed: advance only through the contiguous prefix.
+test("feed gap stops checkpoint advancement at the gap", async () => {
+  const chain = new FakeChain();
+  chain.kits["kit-1"] = kitJson({ kit: "kit-1" });
+  chain.feed.events = [ev(1, "manifest-define", "kit-1"), ev(2, "dispatch", "kit-1"), ev(5, "release", "kit-1")];
+  chain.feed.lastSeq = 5;
+  const applied = await indexOnce(pool, chain as any);
+  assert.equal(applied, 2, "gap halts application at seq 2");
+  const cp = (await pool.query(`SELECT last_seq FROM checkpoint WHERE id=1`)).rows[0];
+  assert.equal(Number(cp.last_seq), 2);
+});
+
+// Provenance (KIT_QA_RELEASE_PROVENANCE): availability transitions are
+// attributed to the event that caused them — a receive must not be stamped
+// AVAILABLE just because the realm's CURRENT state is already released.
+test("outbox attributes AVAILABLE to the release event, not the receipt", async () => {
+  const chain = new FakeChain();
+  // Realm is ALREADY released (current state) while we index older events.
+  chain.kits["kit-1"] = kitJson({ kit: "kit-1", available: true, hold: false });
+  chain.feed.events = [
+    ev(1, "manifest-define", "kit-1"),
+    ev(2, "dispatch", "kit-1"),
+    ev(3, "receive", "kit-1"),        // neutral — no catalogue transition
+    ev(4, "release", "kit-1"),        // owner release — AVAILABLE here
+  ];
+  chain.feed.lastSeq = 4;
+  await indexOnce(pool, chain as any);
+
+  const rows = await pool.query(
+    `SELECT event_seq, state FROM outbox WHERE kit_id='kit-1' ORDER BY seq`);
+  const avail = rows.rows.filter((r) => r.state === "AVAILABLE");
+  assert.equal(avail.length, 1, "exactly one AVAILABLE transition");
+  assert.equal(Number(avail[0].event_seq), 4, "AVAILABLE attributed to release seq");
+  assert.equal(rows.rows.some((r) => Number(r.event_seq) === 3), false,
+    "receive event produced no catalogue transition");
+  // HELD transition recorded once at manifest-define; the subsequent
+  // dispatch is HELD→HELD — no state change, correctly suppressed.
+  const held = rows.rows.filter((r) => r.state === "HELD").map((r) => Number(r.event_seq));
+  assert.deepEqual(held, [1]);
+});
+
 // T-025 (indexer side): re-indexing overlapping finalized heights is
 // idempotent — projection converges to realm state, not duplicated rows.
 test("reindex overlapping heights converges without duplicates", async () => {

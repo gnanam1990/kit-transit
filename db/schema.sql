@@ -169,6 +169,21 @@ CREATE TABLE IF NOT EXISTS cases (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One-use, short-lived sign-in challenges bound to network/realm/org/
+-- device/addr. The staff key signs the embedded signdoc; the API verifies
+-- signature + derived address + live grant before issuing a session.
+CREATE TABLE IF NOT EXISTS auth_challenges (
+    challenge_id TEXT PRIMARY KEY,
+    addr       TEXT NOT NULL,
+    org_id     TEXT NOT NULL,
+    device_id  TEXT NOT NULL,
+    network    TEXT NOT NULL,
+    realm      TEXT NOT NULL,
+    signdoc    TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at    TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
     addr       TEXT NOT NULL,

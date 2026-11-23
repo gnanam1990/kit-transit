@@ -113,23 +113,54 @@ async function refreshKitExceptions(c: Client, chain: ChainClient, kitID: string
   }
 }
 
-/** Append a catalogue outbox row when a kit's HELD/AVAILABLE state changed. */
-async function outboxIfChanged(
-  c: Client, chain: ChainClient, kitID: string, ev: RealmEvent,
+/**
+ * Project an institution's org record and grant history from the realm so
+ * staff sign-in can verify live grants. Called on org-scoped events
+ * (org-enroll, role-grant, role-revoke); grant revocation must land in the
+ * projection before sessions honour it, so this runs inside the same tx.
+ */
+async function refreshOrg(c: Client, chain: ChainClient, orgID: string): Promise<void> {
+  if (!orgID || orgID === "_registrar") return;
+  const res = (await chain.query(`GetOrg(${JSON.stringify(orgID)})`)) as any;
+  if (res.error) return;
+  await c.query(
+    `INSERT INTO proj_orgs (org_id, active, height) VALUES ($1,$2,$3)
+     ON CONFLICT (org_id) DO UPDATE SET active=$2`,
+    [orgID, res.active, res.enrollHeight ?? 0]);
+  for (const g of (res.grants ?? []) as any[]) {
+    await c.query(
+      `INSERT INTO proj_grants (org_id, addr, role, active, granted, revoked)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (org_id, addr, role) DO UPDATE SET active=$4, revoked=$6`,
+      [orgID, g.addr, g.role, g.active, g.granted ?? 0, g.revoked ?? 0]);
+  }
+}
+
+// Availability transitions reduced from the immutable event stream — the
+// ONLY realm operations that change Kit.Available. Reading current kit
+// state for a historical event would misattribute a later owner release to
+// an earlier receipt (provenance). Neutral events (receive, close, assess,
+// exceptions, claims) emit no catalogue transition.
+const AVAIL_STATES: Record<string, "HELD" | "AVAILABLE"> = {
+  "manifest-define": "HELD",
+  "dispatch": "HELD",
+  "return-start": "HELD",
+  "writeoff": "HELD",
+  "release": "AVAILABLE",
+};
+
+/** Append a catalogue outbox row for an event-attributed state transition. */
+async function outboxTransition(
+  c: Client, kitID: string, ev: RealmEvent, state: "HELD" | "AVAILABLE",
 ): Promise<void> {
-  const kit = (await chain.query(`GetKit(${JSON.stringify(kitID)})`)) as any;
-  if (kit.error) return;
-  const state = kit.available ? "AVAILABLE" : "HELD";
   const last = await c.query(
     `SELECT state FROM outbox WHERE kit_id=$1 ORDER BY seq DESC LIMIT 1`, [kitID]);
-  if (last.rows[0]?.state === state) return;
+  if (last.rows[0]?.state === state) return; // unchanged — no duplicate update
   await c.query(
     `INSERT INTO outbox (kit_id, state, event_seq, height, version, payload)
      VALUES ($1,$2,$3,$4,$5,$6)
      ON CONFLICT (kit_id, event_seq, state) DO NOTHING`,
-    [kitID, state, ev.seq, ev.height, kit.manifestRev ?? 0,
-     JSON.stringify({ owner: kit.owner, digest: kit.manifestDigest })],
-  );
+    [kitID, state, ev.seq, ev.height, 0, "{}"]);
 }
 
 /**
@@ -138,7 +169,7 @@ async function outboxIfChanged(
  */
 export class IndexerSuspended extends Error {}
 
-export async function indexOnce(pool: Pool, chain: ChainClient): Promise<number> {
+export async function indexOnce(pool: Pool, chain: ChainClient, limit = 200): Promise<number> {
   const status = await chain.status();
   const cp = await readCheckpoint(pool);
 
@@ -158,7 +189,7 @@ export async function indexOnce(pool: Pool, chain: ChainClient): Promise<number>
     }
   }
 
-  const page = await chain.events(cp?.last_seq ?? 0);
+  const page = await chain.events(cp?.last_seq ?? 0, limit);
   if (page.events.length === 0) {
     // Still refresh height so the checkpoint tracks chain progress.
     if (cp && status.height !== cp.height) {
@@ -170,8 +201,16 @@ export async function indexOnce(pool: Pool, chain: ChainClient): Promise<number>
   }
 
   return inTx(pool, async (c) => {
-    let hash = cp?.feed_hash ?? "";
+    // Serialize concurrent index workers on the checkpoint row.
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext('kittransit-indexer'))`);
+    const locked = (await c.query(
+      `SELECT * FROM checkpoint WHERE id=1 FOR UPDATE`)).rows[0] as any;
+    let lastSeq = Number(locked?.last_seq ?? cp?.last_seq ?? 0);
+    let hash = locked?.feed_hash ?? cp?.feed_hash ?? "";
+    let applied = 0;
     for (const ev of page.events) {
+      if (ev.seq <= lastSeq) continue; // already applied — overlap replay
+      if (lastSeq !== 0 && ev.seq !== lastSeq + 1) break; // gap: never skip ahead
       await c.query(
         `INSERT INTO realm_events (seq,height,kind,kit,leg,line,org,data)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (seq) DO NOTHING`,
@@ -179,11 +218,17 @@ export async function indexOnce(pool: Pool, chain: ChainClient): Promise<number>
       if (ev.kit) {
         await refreshKit(c, chain, ev.kit);
         await refreshKitExceptions(c, chain, ev.kit);
-        await outboxIfChanged(c, chain, ev.kit, ev);
+        const st = AVAIL_STATES[ev.kind];
+        if (st) await outboxTransition(c, ev.kit, ev, st);
       }
       if (ev.leg) await refreshLeg(c, chain, ev.leg);
+      if (ev.org) await refreshOrg(c, chain, ev.org);
       hash = feedHash(hash, ev);
+      lastSeq = ev.seq;
+      applied++;
     }
+    // Advance ONLY to the last contiguous applied seq — GetEvents' lastSeq
+    // is the global feed head, which page limits must not skip to.
     await c.query(
       `INSERT INTO checkpoint (id, network, chain_id, realm, epoch, height,
          last_seq, feed_hash, suspended, suspend_reason)
@@ -191,16 +236,18 @@ export async function indexOnce(pool: Pool, chain: ChainClient): Promise<number>
        ON CONFLICT (id) DO UPDATE SET height=$5, last_seq=$6, feed_hash=$7,
          updated_at=now()`,
       [status.network, page.chainId ?? cp?.chain_id ?? "", page.realm ?? cp?.realm ?? "",
-       cp?.epoch ?? status.epoch, status.height, page.lastSeq, hash]);
-    return page.events.length;
+       cp?.epoch ?? status.epoch, status.height, lastSeq, hash]);
+    return applied;
   });
 }
 
 /** Daemon loop for `npm run indexer`. */
-export async function runIndexer(pool: Pool, chain: ChainClient, pollMs: number): Promise<void> {
+export async function runIndexer(
+  pool: Pool, chain: ChainClient, pollMs: number, limit = 200,
+): Promise<void> {
   for (;;) {
     try {
-      const n = await indexOnce(pool, chain);
+      const n = await indexOnce(pool, chain, limit);
       if (n > 0) process.stdout.write(`indexed ${n} events\n`);
     } catch (err) {
       if (err instanceof IndexerSuspended) {
@@ -221,5 +268,5 @@ if (process.argv[1]?.endsWith("indexer.ts") && process.argv.includes("--daemon")
   const cfg = loadConfig();
   const pool = makePool(cfg.databaseUrl);
   await migrate(pool);
-  await runIndexer(pool, new ChainClient(cfg.rpcUrl, cfg.realm), cfg.pollMs);
+  await runIndexer(pool, new ChainClient(cfg.rpcUrl, cfg.realm), cfg.pollMs, cfg.pageLimit);
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { provisionDb, disposeDb, freshDb } from "./helpers.ts";
 import { storeEvidence, fetchEvidence, EvidenceError } from "../src/evidence.ts";
-import { createSession, getSession, revokeSession } from "../src/sessions.ts";
+import { issueSession, getSession, revokeSession } from "../src/sessions.ts";
 
 const pool = await provisionDb("evidence");
 const dir = mkdtempSync(join(tmpdir(), "kit-evidence-"));
@@ -27,8 +27,8 @@ async function enroll(org: string, addr: string) {
 test("cross-tenant fetch denied; identifying metadata not returned", async () => {
   await enroll("A", "addr-a1");
   await enroll("B", "addr-b1");
-  const aSess = (await createSession(pool, "addr-a1", "A", "dev1", 3600))!;
-  const bSess = (await createSession(pool, "addr-b1", "B", "dev2", 3600))!;
+  const aSess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  const bSess = (await issueSession(pool, "addr-b1", "B", "dev2", 3600))!;
 
   const stored = await storeEvidence(pool, dir, aSess, "case-1", PNG);
   const got = await fetchEvidence(pool, dir, aSess, stored.objectId);
@@ -49,7 +49,7 @@ test("cross-tenant fetch denied; identifying metadata not returned", async () =>
 // After revocation the previously allowed session loses access immediately.
 test("revoked session loses access on next read", async () => {
   await enroll("A", "addr-a1");
-  const sess = (await createSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  const sess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
   const stored = await storeEvidence(pool, dir, sess, "case-2", PDF);
   await fetchEvidence(pool, dir, sess, stored.objectId); // allowed now
   await revokeSession(pool, sess.token);
@@ -67,7 +67,7 @@ test("revoked session loses access on next read", async () => {
 // rejected, and a failed upload never affects the underlying receipt.
 test("upload validation rejects bad content; retry succeeds after failure", async () => {
   await enroll("A", "addr-a1");
-  const sess = (await createSession(pool, "addr-a1", "A", "dev1", 3600))!;
+  const sess = (await issueSession(pool, "addr-a1", "A", "dev1", 3600))!;
 
   await assert.rejects(storeEvidence(pool, dir, sess, "case-3", Buffer.from("not an image")),
     (e: EvidenceError) => e.code === "mime");

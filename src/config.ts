@@ -11,6 +11,8 @@ export interface Config {
   apiPort: number;
   sessionTtlSec: number;
   pollMs: number;
+  pageLimit: number;      // GetEvents page size (KIT_PAGE_LIMIT for QA runs)
+  network: string;        // chain-id bound into staff sign-in challenges
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -24,5 +26,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     apiPort: Number(env.KIT_API_PORT ?? 8080),
     sessionTtlSec: Number(env.KIT_SESSION_TTL_SEC ?? 8 * 3600),
     pollMs: Number(env.KIT_POLL_MS ?? 1000),
+    pageLimit: Number(env.KIT_PAGE_LIMIT ?? 200),
+    network: env.KIT_NETWORK ?? "dev",
   };
 }
