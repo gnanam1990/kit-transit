@@ -1,3 +1,4 @@
+import { verifyRestore } from "./restore.mjs";
 import { strict as assert } from "node:assert";
 import { readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -135,12 +136,20 @@ try {
   const csv = await staff("/api/catalogue/export");
   assert.equal(csv.status, 200);
   assert.match(await csv.text(), /camera,A,HELD/);
+  const restore = await verifyRestore(
+    cfg,
+    c.caseId,
+    obj.objectId,
+    picture,
+    keyHome,
+  );
   const revoke = await staff("/api/session", { method: "DELETE" });
   assert.ok(revoke.ok);
   const after = await staff(imageUrl);
   assert.equal(after.status, 401);
   console.log(
     JSON.stringify({
+      restore,
       challenge: code,
       login,
       org: body.org,

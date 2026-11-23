@@ -25,6 +25,7 @@ docker exec kittransit-pg createdb -U kittransit "$db"
 trap 'docker exec kittransit-pg dropdb -U kittransit --if-exists "$db"' EXIT
 export KIT_DB_URL="postgres://kittransit:kittransit-local-dev@127.0.0.1:5433/$db"
 export KIT_QA_OUTPUT="$root/.local/qa/$db"
+export KIT_PG_CONTAINER=kittransit-pg
 export KIT_QA_PAGE_LIMIT=2 KIT_QA_RELEASE_PROVENANCE=1
 npm run typecheck
 npm test
