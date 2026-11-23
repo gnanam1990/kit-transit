@@ -276,8 +276,8 @@ export function createApi({ cfg, pool, chain }: ApiDeps) {
           return {
             row: "leg", legId: l.leg_id, kit: l.kit,
             partner: dir === "in" ? l.sender : l.dest, direction: dir,
-            expected: Object.values(l.qty ?? {}).reduce((a, b) => a + Number(b), 0),
-            received: Object.values(l.accepted ?? {}).reduce((a, b) => a + Number(b), 0),
+            expected: Object.values(l.qty ?? {}).reduce<number>((a, b) => a + Number(b), 0),
+            received: Object.values(l.accepted ?? {}).reduce<number>((a, b) => a + Number(b), 0),
             outstanding,
             oldestOutstanding: outstanding[0]?.line ?? null,
             lastHeight: Math.max(Number(l.open_height), Number(l.close_height), kitH.get(l.kit) ?? 0),
