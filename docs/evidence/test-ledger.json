@@ -1,0 +1,295 @@
+{
+  "product": "kit-transit",
+  "generated": "local-build",
+  "statusValues": {
+    "PASS": "verified by the cited automated check",
+    "PENDING": "implemented; the cited real-browser or restore-path verification has not run yet — do not treat as passed",
+    "BLOCKED": "cannot be run locally — external authority/resource missing",
+    "NOT_RUN": "no evidence yet"
+  },
+  "suites": {
+    "realm": "GNOROOT=.tools/src/gno .tools/bin/gno test -v realm/gno.land/r/kittransit/custody (19/19 PASS, lint clean)",
+    "app": "npm test — node --test, disposable PostgreSQL database per file (40/40 PASS)",
+    "realChain": "../verification/kit-local-probe.py — signed gnokey txs on gnodev; 13 tx/height 27 journey, 17 tx/height 35 recovery",
+    "qa": "KIT_QA_PAGE_LIMIT=2 | KIT_QA_RELEASE_PROVENANCE=1 | KIT_QA_LOGIN=1 via ../verification/kit-projection-run.sh",
+    "browserQa": "npm run browser:qa — scripts/browser-qa.mjs: disposable gnodev chain + scratch PG + API + headless Chrome (all checks PASS, .local/browser-qa/browser-qa-result.json)",
+    "restore": "../verification/kit-restore-result.json + kit-restore-regression.log (user-owned snapshot tooling)",
+    "cleanCheckout": "../verification/kit-release-ei1v9ije/test.log at revision 8200e37 (33/33 + local E2E, 18 tx h37)"
+  },
+  "cases": [
+    {
+      "id": "T-001",
+      "title": "Enroll A and B; already-bound active key under B refused",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT001_OrgEnrollAndKeyRebind",
+        "realChain: EnrollOrg×2 signed receipts h27"
+      ]
+    },
+    {
+      "id": "T-002",
+      "title": "Revoke receiving key between draft and broadcast; replacement key signs",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT002_RevokeMidFlowReplacementSigns"
+      ]
+    },
+    {
+      "id": "T-003",
+      "title": "Cross-institution private evidence request denied without metadata",
+      "status": "PASS",
+      "evidence": [
+        "app: test/evidence.test.ts cross-tenant + case-relationship denial",
+        "app: auth.test.ts grant-scoped session"
+      ]
+    },
+    {
+      "id": "T-004",
+      "title": "Issue once, replay issuance, amend catalogue label after dispatch",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT004_IssueReplayAmendLabel"
+      ]
+    },
+    {
+      "id": "T-005",
+      "title": "Duplicate serialized lens scan counts once; interchangeable parts bounded",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT005_SerializedDupAndBoundedParts",
+        "desk: web/app.js serialized merge + announcement"
+      ]
+    },
+    {
+      "id": "T-006",
+      "title": "Same-branch barcode collision import quarantined, explicit resolution",
+      "status": "PASS",
+      "evidence": [
+        "app: test/catalogue.test.ts quarantine + resolveQuarantine",
+        "schema: barcode_quarantine"
+      ]
+    },
+    {
+      "id": "T-007",
+      "title": "Two competing dispatches from same parent -> exactly one active leg",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT007_CompetingDispatches"
+      ]
+    },
+    {
+      "id": "T-008",
+      "title": "Identical op replay returns prior result; altered destination conflicts",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT008_ReplayIdenticalThenConflict",
+        "realChain: op replay probe (--retry mode)"
+      ]
+    },
+    {
+      "id": "T-009",
+      "title": "Cancel restores counts once; all-missing observation blocks later cancel",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT009_CancelRestoresOnceAndObservationBlocks"
+      ]
+    },
+    {
+      "id": "T-010",
+      "title": "Six sent, five received at B; public read model shows open lens exception",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT010_SixSentFiveReceived",
+        "realChain: ReceiveDelta five/six + GetExceptions open exc-2"
+      ]
+    },
+    {
+      "id": "T-011",
+      "title": "Origin/other-destination/forwarded acknowledgement all denied, state unchanged",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT011_OriginOtherDestForwardedDenied"
+      ]
+    },
+    {
+      "id": "T-012",
+      "title": "Missing lens received later on same leg; original receipt unchanged",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT012_SupplementalSameLeg",
+        "realChain: second ReceiveDelta same leg"
+      ]
+    },
+    {
+      "id": "T-013",
+      "title": "Full recovery: close to unlocated, return five, found/confirm once, six assessed",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT013_FullRecoveryCycle",
+        "realChain: 17 signed tx height 35, six assessed + available"
+      ]
+    },
+    {
+      "id": "T-014",
+      "title": "Unauthorized branch serviceability denied; receipt and hold intact",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT014_UnauthorizedServiceability"
+      ]
+    },
+    {
+      "id": "T-015",
+      "title": "Write-off -> replacement -> fresh assessment; late find quarantines; retired sighting = discrepancy",
+      "status": "PASS",
+      "evidence": [
+        "realm: TestT015_WriteOffReplacementQuarantine"
+      ]
+    },
+    {
+      "id": "T-016",
+      "title": "Five offline scans survive reload and reappear on reconnect",
+      "status": "PASS",
+      "evidence": [
+        "browserQa: .local/browser-qa/browser-qa-result.json — T-016: shell served offline from sw cache, 5 scans entered while offline, 6 IndexedDB draft lines restored after reload, cached-data badge with age shown",
+        "desk: web/drafts.js IndexedDB store scoped to org/addr/device, web/sw.js navigation fallback"
+      ]
+    },
+    {
+      "id": "T-017",
+      "title": "Realm revision change before reconnect blocks stale draft with diff",
+      "status": "PASS",
+      "evidence": [
+        "browserQa: T-017 — real AmendManifest between draft and sign-off; chain-derived rev 1→2 diff shown, signing blocked, block persists across leave/reopen (pendingManifestReview on the draft), explicit re-review confirmation re-enables signing (browser-qa-result.json)",
+        "desk: openSignOff refetches manifest_rev; renderRevDiff fetches immutable rev N / N+1 from /api/reader/manifest",
+        "realm: Dispatch expectedRev binding"
+      ]
+    },
+    {
+      "id": "T-018",
+      "title": "Refused wallet prompt leaves stable route; only confirmed receipt applies",
+      "status": "PASS",
+      "evidence": [
+        "app: test/confirm.test.ts — confirmed requires verified digest-matched realm receipt; /transition cannot set confirmed",
+        "realChain+Chrome: refused-signing path leaves case recoverable; only GetOp receipt confirms (kit-local-receipt.json)"
+      ]
+    },
+    {
+      "id": "T-019",
+      "title": "Indexer restart after pre-commit stop replays deterministically, no dup outbox",
+      "status": "PASS",
+      "evidence": [
+        "app: test/indexer.test.ts deterministic restart",
+        "indexer: checkpoint+outbox in one tx"
+      ]
+    },
+    {
+      "id": "T-020",
+      "title": "Catalogue transient failure/version conflict -> pending or manual review, receipt unchanged",
+      "status": "PASS",
+      "evidence": [
+        "app: test/catalogue.test.ts outbox conflict stays conflict; realm untouched"
+      ]
+    },
+    {
+      "id": "T-021",
+      "title": "New epoch/lower height/hash mismatch suspends writes, preserves epoch evidence",
+      "status": "PASS",
+      "evidence": [
+        "app: test/indexer.test.ts epoch + network suspension",
+        "indexer: epoch_evidence quarantine"
+      ]
+    },
+    {
+      "id": "T-022",
+      "title": "Six-item receipt keyboard-only, single announcements, focus retained",
+      "status": "PASS",
+      "evidence": [
+        "browserQa: T-022 keyboard-only receipt at 1280px AND 390px — 5 scans + 1 exception row via Tab/Enter only, exactly one announcement per scan, focus retained on scan lane (browser-qa-result.json)",
+        "browserQa: full receive journey — real gnokey sign + broadcast + /confirm => confirmed",
+        "desk: web/index.html aria-live + labels, app.js focus management"
+      ]
+    },
+    {
+      "id": "T-023",
+      "title": "Copied evidence link yields no object; public read has only permitted fields",
+      "status": "PASS",
+      "evidence": [
+        "app: test/evidence.test.ts denied fetch",
+        "api: /api/reader/* returns realm public JSON only",
+        "realm: query.gno public field allowlist"
+      ]
+    },
+    {
+      "id": "T-024",
+      "title": "Failed post-confirmation upload keeps receipt; permitted retry succeeds",
+      "status": "PASS",
+      "evidence": [
+        "app: test/evidence.test.ts upload validation + retry dedup",
+        "browserQa: post-confirmation upload failure surfaced without touching the confirmed receipt; retry succeeded (browser-qa-result.json)",
+        "desk: case view evidence box with explicit retry"
+      ]
+    },
+    {
+      "id": "T-025",
+      "title": "Snapshot restore + overlapping reindex converge with realm query",
+      "status": "PASS",
+      "evidence": [
+        "app: test/reindex.test.ts — rebuild atomicity, delivery history preserved, empty-projection detection",
+        "restore: ../verification/kit-restore-result.json — restored case + 68 evidence bytes, existing DB protected, realm converged AVAILABLE at h37",
+        "restore: ../verification/kit-restore-regression.log — 33/33 + local E2E after restore",
+        "src/reindex.ts — single-tx rebuild + realm-feed inventory verification"
+      ]
+    },
+    {
+      "id": "T-026",
+      "title": "Dropped broadcast response recovered by network/realm/org/op; same op id at two orgs",
+      "status": "PASS",
+      "evidence": [
+        "app: test/audit.test.ts lookupOperation + per-org resolution",
+        "realChain: GetOp retry probe"
+      ]
+    },
+    {
+      "id": "T-027",
+      "title": "Incomplete-case export excludes private fields, missing data stays explicit",
+      "status": "PASS",
+      "evidence": [
+        "app: test/audit.test.ts redacted export"
+      ]
+    },
+    {
+      "id": "T-028",
+      "title": "Fresh checkout + two local wallet keys reproduce the journey via separate reader",
+      "status": "PASS",
+      "evidence": [
+        "cleanCheckout: ../verification/kit-release-ei1v9ije/test.log — fresh checkout of rev 8200e37, 33/33 tests + local E2E, 18 signed tx, final height 37, available=true",
+        "browserQa: scripts/browser-qa.mjs self-contained two-signer run (disposable keys/chain/db) — B receipt + A assess/release all confirmed (browser-qa-result.json)",
+        "web/public.html direct-realm reader"
+      ]
+    },
+    {
+      "id": "T-029",
+      "title": "Public testnet demo with explicit deployment authority",
+      "status": "BLOCKED",
+      "evidence": [],
+      "note": "No deployment authority or testnet access exists for this build; all transactions are local gnodev only. Unblocks when explicit authority is provided."
+    },
+    {
+      "id": "T-030",
+      "title": "Catalogue export + accessible browser journey on installed release reproduce state",
+      "status": "PASS",
+      "evidence": [
+        "app: test/catalogue.test.ts partner CSV file round trip + per-branch delivery isolation",
+        "browserQa: catalogue drain sent 2, partner.csv exports kit rows (browser-qa-result.json)",
+        "browserQa: accessible journey — keyboard-only + offline reload + phone width + queue tabs + owner assess/release + shared-desk logout (browser-qa-result.json, desk-390.png, owner-release-1280.png)",
+        "docs/evidence/release-report.md"
+      ]
+    }
+  ],
+  "summary": {
+    "PASS": 29,
+    "PENDING": 0,
+    "BLOCKED": 1,
+    "NOT_RUN": 0
+  }
+}

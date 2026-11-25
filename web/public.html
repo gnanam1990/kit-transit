@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kit Transit — public custody record</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <h1 class="brand">Kit Transit — public record</h1>
+  <nav aria-label="Public"><a href="index.html">Staff desk</a></nav>
+</header>
+<main id="main">
+  <p class="hint">Read-only public timeline. No login required; private
+    evidence and staff identities are never shown here. This page reads the
+    realm directly, not the staff projection.</p>
+  <label for="pub-kit">Kit id</label>
+  <input id="pub-kit" placeholder="e.g. camera" value="camera">
+  <button id="pub-load" class="btn">Load public record</button>
+  <div id="pub-body"></div>
+</main>
+<script src="timeline.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+async function q(path) {
+  const r = await fetch(path);
+  return r.ok ? r.json() : { error: r.status };
+}
+$("pub-load").addEventListener("click", async () => {
+  const kit = $("pub-kit").value.trim();
+  const body = $("pub-body");
+  body.innerHTML = "";
+  const [k, e] = await Promise.all([
+    q(`/api/reader/kit?id=${encodeURIComponent(kit)}`),
+    q(`/api/reader/exceptions?id=${encodeURIComponent(kit)}`),
+  ]);
+  if (k.error) { body.innerHTML = `<p>Unknown kit.</p>`; return; }
+  const dl = document.createElement("dl");
+  dl.className = "preview";
+  const status = k.available ? "AVAILABLE" : "HELD — not in circulation";
+  const rows = [
+    ["Status", status],
+    ["Owner", k.owner],
+    ["Manifest", `rev ${k.manifestRev} · digest ${String(k.manifestDigest).slice(0, 16)}…`],
+    ["Needs assessment", k.needsAssessment ? "yes" : "no"],
+  ];
+  for (const [a, b] of rows) {
+    const dt = document.createElement("dt"); dt.textContent = a;
+    const dd = document.createElement("dd"); dd.textContent = b;
+    dl.append(dt, dd);
+  }
+  body.appendChild(dl);
+  const ul = document.createElement("ul");
+  ul.className = "lines";
+  for (const l of k.lines || []) {
+    const li = document.createElement("li");
+    const held = Object.entries(l.held || {}).map(([o, n]) => `${o}×${n}`).join(", ") || "none";
+    const tags = [];
+    if (l.inTransit) tags.push(`in transit ×${l.inTransit}`);
+    if (l.unlocated) tags.push(`unlocated ×${l.unlocated}`);
+    if (l.quarantine) tags.push(`quarantine ×${l.quarantine}`);
+    if (l.retired) tags.push(`retired ×${l.retired}`);
+    const part = document.createElement("span");
+    part.textContent = `${l.id} — ${l.label} (assessment: ${l.assessment})`;
+    const badge = document.createElement("span");
+    badge.className = "tag " + (tags.length ? "warn" : "ok");
+    badge.textContent = "held " + held + (tags.length ? " · " + tags.join(", ") : "");
+    li.append(part, badge);
+    ul.appendChild(li);
+  }
+  body.appendChild(ul);
+  for (const x of e.exceptions || []) {
+    const div = document.createElement("div");
+    div.className = "case-statement";
+    const title = document.createElement("h4");
+    title.textContent = `${x.kind} — ${x.line} (${x.status})`;
+    const reason = document.createElement("p");
+    reason.textContent = x.reason;
+    const meta = document.createElement("p");
+    meta.className = "case-meta";
+    meta.textContent = `Raised by ${x.by} at height ${x.openHeight}` +
+      (x.closeHeight ? `, resolved at ${x.closeHeight}` : "");
+    div.append(title, reason, meta);
+    body.appendChild(div);
+  }
+  await showKitTimeline(body, kit);
+});
+</script>
+</body>
+</html>

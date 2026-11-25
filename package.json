@@ -1,0 +1,31 @@
+{
+  "name": "kit-transit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kit Transit \u2014 two-institution library-kit custody on a Gno realm",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "migrate": "node src/migrate.ts",
+    "indexer": "node src/indexer.ts --daemon",
+    "api": "node src/api.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "stack:up": "scripts/dev-stack.sh up",
+    "stack:down": "scripts/dev-stack.sh down",
+    "e2e": "scripts/e2e-local.sh",
+    "reindex": "node src/reindex.ts",
+    "browser:qa": "node scripts/browser-qa.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "playwright-core": "^1.65.1",
+    "typescript": "^5.7.2"
+  }
+}

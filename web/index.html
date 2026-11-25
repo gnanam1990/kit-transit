@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1f3a5f">
+<title>Kit Transit — Staff Desk</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header class="topbar">
+  <h1 class="brand">Kit Transit</h1>
+  <nav aria-label="Desk">
+    <button data-nav="queue" aria-current="page">Queue</button>
+    <button data-nav="receive">Receive</button>
+    <button data-nav="case">Case</button>
+    <button data-nav="session">Sign in</button>
+    <a href="public.html">Public view</a>
+  </nav>
+  <p id="who" class="who" aria-live="polite"></p>
+</header>
+
+<p id="net" class="netline" role="status"></p>
+<div id="announce" class="sr-only" role="status" aria-live="polite"></div>
+<div id="cache-badge" class="cache-badge" hidden role="note"></div>
+
+<main id="main">
+  <!-- Institution work queue: what needs this desk's attention -->
+  <section id="view-queue" class="view" aria-labelledby="queue-h">
+    <h2 id="queue-h">Work queue</h2>
+    <p id="queue-sub" class="hint" role="status"></p>
+    <div class="qtabbar" role="tablist" aria-label="Queue">
+      <button role="tab" id="qtab-incoming" aria-selected="true">Incoming (0)</button>
+      <button role="tab" id="qtab-outgoing" aria-selected="false">Outgoing (0)</button>
+      <button role="tab" id="qtab-exceptions" aria-selected="false">Exceptions (0)</button>
+      <button role="tab" id="qtab-audit" aria-selected="false">Audit (0)</button>
+    </div>
+    <ul id="queue-body" class="lines"></ul>
+  </section>
+
+  <!-- Receiving station -->
+  <section id="view-receive" class="view" hidden aria-labelledby="receive-h">
+    <h2 id="receive-h">Receiving desk</h2>
+    <div class="legpicker">
+      <label for="kit-sel">Kit and active leg to receive</label>
+      <select id="kit-sel" disabled>
+        <option value="">— sign in to load incoming kits —</option>
+      </select>
+      <p id="leg-info" class="hint" role="status"></p>
+    </div>
+    <form id="scan-form" class="scanbox">
+      <label for="scan">Scan or type a barcode, then press Enter</label>
+      <p class="hint" id="scan-hint">Serialized items count once per scan — repeated
+        scans of the same serial are merged, not added.</p>
+      <input id="scan" name="scan" inputmode="text" autocomplete="off"
+             autocapitalize="none" spellcheck="false"
+             aria-describedby="scan-hint" required>
+      <button type="submit" class="btn">Add scan</button>
+      <button type="button" id="lookup" class="btn ghost">Manual lookup…</button>
+    </form>
+
+    <div class="draftbar">
+      <p id="draft-state"></p>
+      <button type="button" id="undo" class="btn ghost" disabled>Undo last scan</button>
+      <button type="button" id="discard" class="btn ghost" disabled>Discard draft</button>
+    </div>
+
+    <h3>Counted lines</h3>
+    <ul id="lines" class="lines"></ul>
+
+    <details id="exception-panel" class="exc">
+      <summary>Report an exception</summary>
+      <label for="exc-kind">Exception type</label>
+      <select id="exc-kind">
+        <option value="missing">missing</option>
+        <option value="damaged">damaged</option>
+        <option value="discrepancy">discrepancy</option>
+      </select>
+      <label for="exc-line">Line</label>
+      <input id="exc-line" placeholder="line id e.g. lens">
+      <label for="exc-reason">Reason</label>
+      <input id="exc-reason" placeholder="what the staff member observed">
+      <button type="button" id="exc-add" class="btn ghost">Add to receipt</button>
+    </details>
+
+    <button type="button" id="signoff" class="btn primary" disabled>
+      Review and sign receipt
+    </button>
+  </section>
+
+  <!-- Sign-off / wallet preview -->
+  <section id="view-sign" class="view" hidden aria-labelledby="sign-h">
+    <h2 id="sign-h">Review before signing</h2>
+    <p class="hint">You are signing an institutional attestation on the chain.
+      Review every line — this statement becomes part of the kit's permanent
+      custody record.</p>
+    <dl id="preview" class="preview"></dl>
+    <div id="revdiff" class="revdiff" hidden>
+      <h3>Manifest changed since you drafted</h3>
+      <ul id="revdiff-lines" class="lines"></ul>
+      <p class="hint">The draft was reviewed against an older manifest revision.
+        The immutable before/after above comes straight from the realm —
+        confirm you re-reviewed it before signing.</p>
+      <button id="re-review" class="btn" type="button">I re-reviewed the changes</button>
+    </div>
+    <p id="attest" class="attest"></p>
+    <div class="actions">
+      <button id="do-sign" class="btn primary">Sign with institution key</button>
+      <button id="back-draft" class="btn ghost">Back to draft</button>
+    </div>
+    <div id="sign-steps" class="signsteps" hidden>
+      <ol>
+        <li>Save the unsigned transaction below and sign it with the
+          institution key: <code>cp tx.json signed.json</code>, then <code>gnokey sign -tx-path signed.json
+          -chainid &lt;network&gt; -account-number N -account-sequence M &lt;key-name&gt;</code></li>
+        <li>Broadcast it — either yourself
+          (<code>gnokey broadcast -remote &lt;rpc&gt; signed.json</code>)
+          and paste the transaction hash below, or paste the whole signed
+          document and let the configured relay transmit it.</li>
+        <li>Press <em>Check chain receipt</em> — a case is confirmed only
+          when the realm's own receipt for this exact operation is visible.</li>
+      </ol>
+      <label for="unsigned-tx">Unsigned transaction (for gnokey sign)</label>
+      <textarea id="unsigned-tx" readonly rows="9"></textarea>
+      <div class="actions">
+        <button id="download-tx" class="btn ghost" type="button">
+          Download unsigned tx</button>
+        <button id="copy-tx" class="btn ghost" type="button">
+          Copy to clipboard</button>
+      </div>
+      <label for="txhash-in">Transaction hash (after external broadcast)</label>
+      <input id="txhash-in" autocomplete="off" spellcheck="false"
+             placeholder="base64 hash printed by gnokey broadcast">
+      <button id="mark-broadcast" class="btn" type="button">
+        Record broadcast</button>
+      <label for="signed-doc">Or paste the signed document (relay, if configured)</label>
+      <textarea id="signed-doc" rows="6" autocomplete="off" spellcheck="false"
+                placeholder='{"msg":[…],"signatures":[…]}'></textarea>
+      <button id="relay-btn" class="btn" type="button">
+        Relay signed document</button>
+      <div class="actions">
+        <button id="check-receipt" class="btn primary" type="button">
+          Check chain receipt</button>
+        <button id="back-sign" class="btn ghost" type="button">
+          Keep as draft and go back</button>
+      </div>
+      <p id="sign-status" role="status"></p>
+    </div>
+  </section>
+
+  <!-- Case view -->
+  <section id="view-case" class="view" hidden aria-labelledby="case-h">
+    <h2 id="case-h">Custody case</h2>
+    <label for="case-kit">Kit</label>
+    <input id="case-kit" placeholder="kit id e.g. camera">
+    <label for="case-leg">Leg</label>
+    <select id="case-leg"></select>
+    <button id="case-load" class="btn">Load case</button>
+    <h3>My institution's open cases</h3>
+    <ul id="case-list" class="lines"></ul>
+    <fieldset class="evbox">
+      <legend>Photo evidence (private, case-scoped)</legend>
+      <p class="hint">Attachments are separate from the chain receipt — a failed
+        upload never affects case state and can always be retried.</p>
+      <label for="ev-case">Attach to case</label>
+      <select id="ev-case"></select>
+      <label for="ev-file">Photo or PDF (private to your institution)</label>
+      <input id="ev-file" type="file" accept="image/jpeg,image/png,image/webp,application/pdf">
+      <div class="actions">
+        <button id="ev-upload" class="btn ghost" type="button">Upload attachment</button>
+        <button id="ev-retry" class="btn ghost" type="button" hidden>Retry upload</button>
+      </div>
+      <p id="ev-status" role="status"></p>
+    </fieldset>
+    <div id="case-body"></div>
+    <fieldset id="assess-panel" class="evbox" hidden>
+      <legend>Owner assessment (returned kit)</legend>
+      <p class="hint">The owner inspects each returned line. The result is a
+        chain attestation signed by the owner key — it cannot be undone.</p>
+      <ul id="assess-lines" class="lines"></ul>
+      <div class="actions">
+        <button id="assess-review" class="btn primary" type="button">
+          Review assessment for signing</button>
+      </div>
+      <p id="assess-status" role="status"></p>
+    </fieldset>
+    <div id="release-area" class="actions">
+      <button id="release-kit" class="btn primary" type="button" hidden>
+        Release kit back to circulation</button>
+    </div>
+  </section>
+
+  <!-- Session -->
+  <section id="view-session" class="view" hidden aria-labelledby="session-h">
+    <h2 id="session-h">Staff sign-in</h2>
+    <p class="hint">Sign-in proves control of an enrolled institution key —
+      a public address alone is never enough. The desk builds a one-use
+      challenge; sign it with gnokey and paste the signature.</p>
+    <form id="challenge-form">
+      <label for="login-org">Institution</label>
+      <input id="login-org" required placeholder="e.g. A">
+      <label for="login-addr">Your gno address</label>
+      <input id="login-addr" required placeholder="g1…" autocomplete="off" spellcheck="false">
+      <label for="login-device">This device/desk</label>
+      <input id="login-device" required placeholder="e.g. returns-desk-1">
+      <button class="btn primary" type="submit">Get sign-in challenge</button>
+    </form>
+    <div id="challenge-steps" hidden>
+      <label for="ch-tx">Sign this transaction with gnokey</label>
+      <textarea id="ch-tx" readonly rows="8"></textarea>
+      <p class="hint">Example:
+        <code>gnokey sign -tx-path ch.json -chainid &lt;network&gt;
+          -account-number 0 -account-sequence 0 -output-document sig.json</code>
+      </p>
+      <label for="ch-pubkey">pub_key value (base64)</label>
+      <input id="ch-pubkey" autocomplete="off" spellcheck="false">
+      <label for="ch-sig">signature (base64)</label>
+      <input id="ch-sig" autocomplete="off" spellcheck="false">
+      <button id="ch-submit" class="btn primary">Complete sign-in</button>
+      <p id="login-status" role="status"></p>
+    </div>
+    <button id="logout" class="btn ghost" hidden>Sign out</button>
+  </section>
+</main>
+
+<script src="timeline.js"></script>
+<script src="drafts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
